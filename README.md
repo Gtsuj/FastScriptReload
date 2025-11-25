@@ -169,3 +169,4 @@ I'd love to continue spending most of my time making FSR better, as a indie dev 
 
 **[Support FSR by becoming a patron!](https://www.patreon.com/FastScriptReload)**
 
+
