@@ -24,8 +24,8 @@ namespace FastScriptReload.Runtime
         const BindingFlags ALL_BINDING_FLAGS = BindingFlags.Public | BindingFlags.NonPublic |
                                                BindingFlags.Static | BindingFlags.Instance |
                                                BindingFlags.FlattenHierarchy;
-            
-        const BindingFlags ALL_DECLARED_METHODS_BINDING_FLAGS = BindingFlags.Public | BindingFlags.NonPublic |
+
+        public const BindingFlags ALL_DECLARED_METHODS_BINDING_FLAGS = BindingFlags.Public | BindingFlags.NonPublic |
                                                                 BindingFlags.Static | BindingFlags.Instance |
                                                                 BindingFlags.DeclaredOnly; //only declared methods can be redirected, otherwise it'll result in hang
         
