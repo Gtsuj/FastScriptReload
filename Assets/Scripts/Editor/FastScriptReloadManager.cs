@@ -66,6 +66,8 @@ namespace FastScriptReload.Editor
 
         private List<DynamicFileHotReloadState> _dynamicFileHotReloadStateEntries = new List<DynamicFileHotReloadState>();
 
+        public List<DynamicFileHotReloadState> DynamicFileHotReloadStateEntries => _dynamicFileHotReloadStateEntries;
+
         private DateTime _lastTimeChangeBatchRun = default(DateTime);
         private bool _assemblyChangesLoaderResolverResolutionAlreadyCalled;
         private bool _isEditorModeHotReloadEnabled;
@@ -567,49 +569,51 @@ namespace FastScriptReload.Editor
                         sourceCodeFilesWithUniqueChangesAwaitingHotReload = changesAwaitingHotReload
                             .GroupBy(e => e.FullFileName)
                             .Select(e => e.First().FullFileName).ToList();
-                    
-                        var dynamicallyLoadedAssemblyCompilerResult = DynamicAssemblyCompiler.Compile(sourceCodeFilesWithUniqueChangesAwaitingHotReload, unityMainThreadDispatcher);
-                        if (!dynamicallyLoadedAssemblyCompilerResult.IsError)
+
+                        // 编译改动的C#文件
+                        var result = ReloadHelper.CompileCsFiles(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
+                        if (!result)
                         {
                             changesAwaitingHotReload.ForEach(c =>
                             {
-                                c.FileCompiledOn = DateTime.UtcNow;
-                                c.AssemblyNameCompiledIn = dynamicallyLoadedAssemblyCompilerResult.CompiledAssemblyPath;
+                                c.ErrorOn = DateTime.UtcNow;
                             });
-
-                            //TODO: return some proper results to make sure entries are correctly updated
-                            assemblyChangesLoader.DynamicallyUpdateMethodsForCreatedAssembly(dynamicallyLoadedAssemblyCompilerResult.CompiledAssembly, AssemblyChangesLoaderEditorOptionsNeededInBuild);
-                            changesAwaitingHotReload.ForEach(c =>
-                            {
-                                c.HotSwappedOn = DateTime.UtcNow;
-                                c.IsBeingProcessed = false;
-                            }); //TODO: technically not all were hot swapped at same time
-
-                            _hotReloadPerformedCount++;
-                            
-                            SafeInvoke(HotReloadSucceeded, changesAwaitingHotReload);
+                            return;
                         }
-                        else
+
+                        // 比较原类型和修改后的类型（使用全局缓存的解析选项）
+                        var hookTypeInfos = ReloadHelper.DiffAssembly(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
+                        if (hookTypeInfos == null || hookTypeInfos.Count == 0)
                         {
-                            if (dynamicallyLoadedAssemblyCompilerResult.MessagesFromCompilerProcess.Count > 0)
-                            {
-                                var msg = new StringBuilder();
-                                foreach (string message in dynamicallyLoadedAssemblyCompilerResult.MessagesFromCompilerProcess)
-                                {
-                                    msg.AppendLine($"Error  when compiling, it's best to check code and make sure it's compilable \r\n {message}\n");
-                                }
-
-                                var errorMessage = msg.ToString();
-
-                                changesAwaitingHotReload.ForEach(c =>
-                                {
-                                    c.ErrorOn = DateTime.UtcNow;
-                                    c.ErrorText = errorMessage;
-                                });
-
-                                throw new Exception(errorMessage);
-                            }
+                            return;
                         }
+
+                        foreach (var hookTypeInfo in hookTypeInfos)
+                        {
+                            ReloadHelper.HookTypeInfoCache[hookTypeInfo.TypeFullName] = hookTypeInfo;
+                        }
+
+                        // 删除冗余部分，将改动的方法转换为静态方法
+                        var assemblyPath = ReloadHelper.ModifyCompileAssembly(hookTypeInfos);
+                        
+                        changesAwaitingHotReload.ForEach(c =>
+                        {
+                            c.FileCompiledOn = DateTime.UtcNow;
+                            c.AssemblyNameCompiledIn = assemblyPath;
+                        });
+                        
+                        // 应用热重载Hook
+                        ReloadHelper.ApplyHooks(hookTypeInfos);
+
+                        changesAwaitingHotReload.ForEach(c =>
+                        {
+                            c.HotSwappedOn = DateTime.UtcNow;
+                            c.IsBeingProcessed = false;
+                        }); //TODO: technically not all were hot swapped at same time
+
+                        _hotReloadPerformedCount++;
+
+                        SafeInvoke(HotReloadSucceeded, changesAwaitingHotReload);
                     }
                     catch (Exception ex)
                     {
@@ -626,6 +630,10 @@ namespace FastScriptReload.Editor
                         });
 
                         SafeInvoke(HotReloadFailed, changesAwaitingHotReload);
+                    }
+                    finally
+                    {
+                        ReloadHelper.ClearAll();
                     }
                 });
             }
@@ -695,7 +703,7 @@ namespace FastScriptReload.Editor
             }
         }
         
-                private static bool TryWorkaroundForUnityFileWatcherBug(FileSystemEventArgs e, ref string filePathToUse)
+        private static bool TryWorkaroundForUnityFileWatcherBug(FileSystemEventArgs e, ref string filePathToUse)
         {
             LoggerScoped.LogWarning(@"Fast Script Reload - Unity File Path Bug - Warning!
 Path for changed file passed by Unity does not exist. This is a known editor bug, more info: https://issuetracker.unity3d.com/issues/filesystemwatcher-returns-bad-file-path
