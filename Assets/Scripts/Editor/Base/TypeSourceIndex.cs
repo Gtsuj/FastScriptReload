@@ -22,10 +22,9 @@ namespace FastScriptReload.Editor
         private static bool _isInitialized = false;
 
         /// <summary>
-        /// 初始化索引（建议在热重载初始化或首次编译时调用）
+        /// 初始化索引
         /// </summary>
-        [InitializeOnEnterPlayMode]
-        public static async void EnsureInitialized()
+        public static async Task EnsureInitialized()
         {
             if (!(bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles.GetEditorPersistedValueOrDefault())
             {
@@ -64,7 +63,7 @@ namespace FastScriptReload.Editor
 
             foreach (var filePath in filePaths)
             {
-                var tree = HotReloadCache.GetOrParseSyntaxTree(filePath);
+                var tree = ReloadHelper.GetOrParseSyntaxTree(filePath);
                 if (tree == null) continue;
 
                 var root = tree.GetRoot();
@@ -120,7 +119,7 @@ namespace FastScriptReload.Editor
             // try
             // {
                 filePath = filePath.Replace('/', '\\');
-                var tree = HotReloadCache.GetOrParseSyntaxTree(filePath);
+                var tree = ReloadHelper.GetOrParseSyntaxTree(filePath);
                 var root = tree.GetRoot();
 
                 var typeDecls = root.DescendantNodes().OfType<TypeDeclarationSyntax>();

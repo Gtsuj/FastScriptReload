@@ -571,7 +571,7 @@ namespace FastScriptReload.Editor
                             .Select(e => e.First().FullFileName).ToList();
 
                         // 编译改动的C#文件
-                        var result = CompileHelper.CompileCsFiles(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
+                        var result = ReloadHelper.CompileCsFiles(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
                         if (!result)
                         {
                             changesAwaitingHotReload.ForEach(c =>
@@ -594,7 +594,7 @@ namespace FastScriptReload.Editor
                         }
 
                         // 删除冗余部分，将改动的方法转换为静态方法
-                        var assemblyPath = CompileHelper.ModifyCompileAssembly(hookTypeInfos);
+                        var assemblyPath = ReloadHelper.ModifyCompileAssembly(hookTypeInfos);
                         
                         changesAwaitingHotReload.ForEach(c =>
                         {
@@ -633,7 +633,7 @@ namespace FastScriptReload.Editor
                     }
                     finally
                     {
-                        HotReloadCache.ClearAll();
+                        ReloadHelper.ClearAll();
                     }
                 });
             }
