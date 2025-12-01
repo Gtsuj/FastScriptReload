@@ -52,7 +52,11 @@ namespace FastScriptReload.Editor
                 void HandleModifyMethod(string hookMethodName, HookMethodInfo hookMethodInfo)
                 {
                     var methodDef = methodsToRemove.FirstOrDefault((definition => definition.FullName == hookMethodName));
-                    
+                    if (methodDef == null)
+                    {
+                        return;
+                    }
+
                     var newMethodDef = ModifyMethod(mainModule, methodDef, mainModule.ImportReference(info.ExistingType));
                     hookMethodInfo.ModifyMethodName = newMethodDef.FullName;
                     hookMethodInfo.MethodDefinition = newMethodDef;
