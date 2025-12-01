@@ -41,16 +41,6 @@ namespace FastScriptReload.Editor
         private static AssemblyDefinition _assemblyDefinition;
 
         /// <summary>
-        /// 文件内容缓存（文件路径 -> 文件内容）
-        /// </summary>
-        private static readonly Dictionary<string, string> _fileContentCache = new();
-
-        /// <summary>
-        /// 语法树缓存（文件路径 -> 语法树）
-        /// </summary>
-        private static readonly Dictionary<string, SyntaxTree> _syntaxTreeCache = new();
-
-        /// <summary>
         /// 程序集定义缓存（程序集路径 -> AssemblyDefinition）
         /// </summary>
         private static readonly Dictionary<string, AssemblyDefinition> _assemblyDefinitionCache = new(StringComparer.OrdinalIgnoreCase);
@@ -104,58 +94,33 @@ namespace FastScriptReload.Editor
                 languageVersion: LanguageVersion.Latest
             );
         }
-
-        /// <summary>
-        /// 获取或读取文件内容
-        /// </summary>
-        public static string GetOrReadFileContent(string filePath)
-        {
-            if (string.IsNullOrEmpty(filePath))
-                return null;
-
-            if (!_fileContentCache.TryGetValue(filePath, out var content))
-            {
-                if (!File.Exists(filePath))
-                {
-                    return null;
-                }
-
-                content = File.ReadAllText(filePath);
-                _fileContentCache[filePath] = content;
-            }
-
-            return content;
-        }
-
+        
         /// <summary>
         /// 获取或解析语法树（使用全局缓存的解析选项）
         /// </summary>
-        public static SyntaxTree GetOrParseSyntaxTree(string filePath)
+        public static SyntaxTree GetSyntaxTree(string filePath)
         {
             if (string.IsNullOrEmpty(filePath))
             {
                 return null;
             }
 
-            // 使用文件路径作为缓存键（解析选项是全局的，不需要包含在键中）
-            if (_syntaxTreeCache.TryGetValue(filePath, out var syntaxTree))
-            {
-                return syntaxTree;
-            }
-            
-            var content = GetOrReadFileContent(filePath);
-            if (content == null)
+            if (!File.Exists(filePath))
             {
                 return null;
             }
 
-            syntaxTree = CSharpSyntaxTree.ParseText(
+            var content = File.ReadAllText(filePath);
+            if (string.IsNullOrEmpty(content))
+            {
+                return null;
+            }
+
+            var syntaxTree = CSharpSyntaxTree.ParseText(
                 content,
                 _parseOptions,
                 path: filePath
             );
-
-            _syntaxTreeCache[filePath] = syntaxTree;
 
             return syntaxTree;
         }
@@ -179,7 +144,7 @@ namespace FastScriptReload.Editor
                 {
                     assemblyDef = AssemblyDefinition.ReadAssembly(
                         assemblyPath,
-                        new ReaderParameters { ReadWrite = false }
+                        new ReaderParameters { ReadWrite = true }
                     );
                     _assemblyDefinitionCache[assemblyPath] = assemblyDef;
                 }
@@ -233,21 +198,10 @@ namespace FastScriptReload.Editor
             // 释放程序集定义（它们实现了IDisposable）
             foreach (var assemblyDef in _assemblyDefinitionCache.Values)
             {
-                try
-                {
-                    assemblyDef?.Dispose();
-                }
-                catch
-                {
-                    // 忽略释放时的异常
-                }
+                assemblyDef?.Dispose();
             }
-
-            _fileContentCache.Clear();
             
             _assemblyDefinitionCache.Clear();
-            _assemblyReferencesCache = null;
-            _syntaxTreeCache.Clear();
             _assemblyDefinition?.Dispose();
             _assemblyDefinition = null;
 

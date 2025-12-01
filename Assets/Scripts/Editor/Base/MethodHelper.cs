@@ -1,5 +1,6 @@
-﻿#if ENABLE_MONO && (DEVELOPMENT_BUILD || UNITY_EDITOR)
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -50,10 +51,11 @@ namespace FastScriptReload.Editor
         public static string FullName(this MethodBase member)
         {
             Type returnType = AccessTools.GetReturnedType(member);
-            
+
             StringBuilder builder = new StringBuilder();
-            builder.Append(returnType.FullName).Append(" ").
-                Append(member.DeclaringType == null ? member.Name : member.DeclaringType.FullName + "::" + member.Name);
+            builder.Append(returnType.FullName).Append(" ").Append(member.DeclaringType == null
+                ? member.Name
+                : member.DeclaringType.FullName + "::" + member.Name);
             builder.Append("(");
             if (member.GetParameters().Length > 0)
             {
@@ -66,8 +68,22 @@ namespace FastScriptReload.Editor
                     builder.Append(parameterDefinition.ParameterType.FullName);
                 }
             }
+
             builder.Append(")");
             return builder.ToString();
+        }
+
+        public static IEnumerable<MethodBase> GetAllMethods(this Type type)
+        {
+            var flags = BindingFlags.Public | BindingFlags.NonPublic |
+                BindingFlags.Static | BindingFlags.Instance |
+                BindingFlags.DeclaredOnly;
+            // 找出修改的方法
+            var methods = type.GetConstructors(flags)
+                .Cast<MethodBase>()
+                .Concat(type.GetMethods(flags));
+
+            return methods;
         }
 
         //see _MonoMethod struct in class-internals.h
@@ -123,4 +139,3 @@ namespace FastScriptReload.Editor
         }
     }
 }
-#endif
