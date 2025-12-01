@@ -60,7 +60,6 @@ namespace FastScriptReload.Editor
 
                 if (wrapperMethod == null)
                 {
-                    LoggerScoped.LogWarning($"在 Wrapper 程序集中找不到方法: {methodName}");
                     return null;
                 }
                 
@@ -96,6 +95,11 @@ namespace FastScriptReload.Editor
                 }
 
                 var wrapperMethod = FindWrapperMethod(updateMethodInfo.ModifyMethodName);
+                if (wrapperMethod == null)
+                {
+                    LoggerScoped.LogError($"Can't find wrapper method: {updateMethodInfo.ModifyMethodName}");
+                    continue;
+                }
                 
                 Hook(methodFullName, updateMethodInfo, updateMethodInfo.OriginalMethod, wrapperMethod);
             }
@@ -109,6 +113,10 @@ namespace FastScriptReload.Editor
                 }
                 
                 var wrapperMethod = FindWrapperMethod(addedMethodInfo.ModifyMethodName);
+                if (wrapperMethod == null)
+                {
+                    continue;
+                }
                 
                 foreach (var historicalMethod in addedMethodInfo.HistoricalHookedMethods)
                 {
