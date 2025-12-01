@@ -115,6 +115,8 @@ namespace FastScriptReload.Editor
             var newMethodMap = newTypeDef.Methods.ToDictionary(
                 m => m.FullName, m => m
             );
+            
+            bool isModified = false;
 
             // 找出添加的方法
             foreach (var (name, def) in newMethodMap)
@@ -134,6 +136,7 @@ namespace FastScriptReload.Editor
                         LoggerScoped.LogDebug($"发现新增的方法: {name}");
                     }
 
+                    isModified |= addedMethodInfo.IsDirty;
                     typeDiff.AddedMethods[name] = addedMethodInfo;
                 }
             }
@@ -171,13 +174,12 @@ namespace FastScriptReload.Editor
                 }
 
                 modifiedMethod.IsDirty = true;
+                isModified |= modifiedMethod.IsDirty;
 
                 LoggerScoped.LogDebug($"发现修改的方法: {existingMethodDef.FullName}");
             }
 
-            if (typeDiff.AddedMethods.Count == 0 &&
-                typeDiff.RemovedMethods.Count == 0 &&
-                typeDiff.ModifiedMethods.Count == 0)
+            if (!isModified)
             {
                 return null;
             }
