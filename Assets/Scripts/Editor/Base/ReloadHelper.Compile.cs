@@ -37,7 +37,7 @@ namespace FastScriptReload.Editor
 
                 foreach (var csFilePath in filesToCompile)
                 {
-                    var syntaxTree = GetOrParseSyntaxTree(csFilePath);
+                    var syntaxTree = GetSyntaxTree(csFilePath);
                     if (syntaxTree == null)
                     {
                         LoggerScoped.LogError($"无法解析文件: {csFilePath}");
@@ -87,8 +87,6 @@ namespace FastScriptReload.Editor
                     ms.Seek(0, SeekOrigin.Begin);
                     _assemblyDefinition = AssemblyDefinition.ReadAssembly(ms, new ReaderParameters { ReadWrite = true, InMemory = true });
 
-                    // var filePath = Path.Combine(AssemblyPath, assemblyName + ".dll");
-                    // File.WriteAllBytes(filePath, ms.ToArray());
                     return true;
                 }
 

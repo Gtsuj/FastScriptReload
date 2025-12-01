@@ -63,7 +63,7 @@ namespace FastScriptReload.Editor
 
             foreach (var filePath in filePaths)
             {
-                var tree = ReloadHelper.GetOrParseSyntaxTree(filePath);
+                var tree = ReloadHelper.GetSyntaxTree(filePath);
                 if (tree == null) continue;
 
                 var root = tree.GetRoot();
@@ -119,7 +119,7 @@ namespace FastScriptReload.Editor
             // try
             // {
                 filePath = filePath.Replace('/', '\\');
-                var tree = ReloadHelper.GetOrParseSyntaxTree(filePath);
+                var tree = ReloadHelper.GetSyntaxTree(filePath);
                 var root = tree.GetRoot();
 
                 var typeDecls = root.DescendantNodes().OfType<TypeDeclarationSyntax>();

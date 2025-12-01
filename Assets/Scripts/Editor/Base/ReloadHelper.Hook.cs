@@ -52,81 +52,70 @@ namespace FastScriptReload.Editor
             }
 
             // 获取 Wrapper 类型中的所有静态方法（公有和私有）
-            var wrapperMethods = wrapperType.GetMethods(AssemblyChangesLoader.ALL_DECLARED_METHODS_BINDING_FLAGS);
+            var wrapperMethods = wrapperType.GetAllMethods().ToArray();
 
-            // 遍历修改的方法，进行Hook
-            foreach (var (methodFullName, updateMethodInfo) in typeInfo.ModifiedMethods)
+            MethodBase FindWrapperMethod(string methodName)
             {
-                // 直接通过 NewMethodDefinition.Name 查找匹配的方法
-                var wrapperMethod = wrapperMethods.FirstOrDefault(m => m.FullName() == updateMethodInfo.ModifyMethodName);
+                var wrapperMethod = wrapperMethods.FirstOrDefault(m => m.FullName() == methodName);
 
                 if (wrapperMethod == null)
                 {
-                    updateMethodInfo.ErrorMessage = $"在 Wrapper 程序集中找不到方法: {methodFullName}";
-                    LoggerScoped.LogWarning(updateMethodInfo.ErrorMessage);
-                    continue;
+                    LoggerScoped.LogWarning($"在 Wrapper 程序集中找不到方法: {methodName}");
+                    return null;
                 }
                 
                 MethodHelper.DisableVisibilityChecks(wrapperMethod);
-                
+
+                return wrapperMethod;
+            }
+
+            void Hook(string methodFullName, HookMethodInfo hookMethodInfo, MethodBase original, MethodBase replacement)
+            {
                 // 执行 Hook
-                var errorMessage = Memory.DetourMethod(updateMethodInfo.ExistingMethod, wrapperMethod);
+                var errorMessage = Memory.DetourMethod(original, replacement);
                 
                 if (string.IsNullOrEmpty(errorMessage))
                 {
                     // Hook 成功
-                    updateMethodInfo.NewMethod = wrapperMethod;
+                    hookMethodInfo.IsDirty = false;
+                    
                     LoggerScoped.Log($"Hook Success: {methodFullName}");
                 }
                 else
                 {
-                    // Hook 失败
-                    updateMethodInfo.ErrorMessage = errorMessage;
                     LoggerScoped.LogError($"Hook Failed: {methodFullName}, Error: {errorMessage}");
                 }
             }
 
-            // 遍历新增的方法，进行Hook
-            foreach (var addedMethod in typeInfo.AddedMethods)
+            // 遍历修改的方法，进行Hook
+            foreach (var (methodFullName, updateMethodInfo) in typeInfo.ModifiedMethods)
             {
-                var addedMethodInfo = addedMethod.Value;
-
-                var methodName = addedMethodInfo.ModifyMethodName;
-                var wrapperMethod = wrapperMethods.FirstOrDefault(m => m.FullName() == methodName);
-
-                MethodHelper.DisableVisibilityChecks(wrapperMethod);
-
-                if (addedMethodInfo.CurrentMethod != null)
+                if (!updateMethodInfo.IsDirty)
                 {
-                    addedMethodInfo.HistoricalHookedMethods.Add(addedMethodInfo.CurrentMethod);
+                    continue;
                 }
 
-                addedMethodInfo.CurrentMethod = wrapperMethod;
+                var wrapperMethod = FindWrapperMethod(updateMethodInfo.ModifyMethodName);
+                
+                Hook(methodFullName, updateMethodInfo, updateMethodInfo.OriginalMethod, wrapperMethod);
+            }
 
-                // 如果 IsDirty = true，需要重新Hook历史Hook的方法
-                if (addedMethodInfo.IsDirty && addedMethodInfo.HistoricalHookedMethods != null && addedMethodInfo.HistoricalHookedMethods.Count > 0)
+            // 遍历新增的方法，进行Hook
+            foreach (var (methodFullName, addedMethodInfo) in typeInfo.AddedMethods)
+            {
+                if (!addedMethodInfo.IsDirty)
                 {
-                    foreach (var historicalMethod in addedMethodInfo.HistoricalHookedMethods)
-                    {
-                        if (historicalMethod == null)
-                        {
-                            continue;
-                        }
-
-                        // 重新Hook历史方法到新的Wrapper方法
-                        var errorMessage = Memory.DetourMethod(historicalMethod, wrapperMethod);
-
-                        if (!string.IsNullOrEmpty(errorMessage))
-                        {
-                            LoggerScoped.LogWarning($"Hook Failed: {historicalMethod.DeclaringType?.FullName}.{historicalMethod.Name} -> {methodName}, Error: {errorMessage}");
-                            return;
-                        }
-                    }
-
-                    addedMethodInfo.IsDirty = false; // 重置dirty标记
+                    continue;
                 }
-
-                LoggerScoped.Log($"Hook Success: {typeInfo.TypeFullName}.{methodName}");
+                
+                var wrapperMethod = FindWrapperMethod(addedMethodInfo.ModifyMethodName);
+                
+                foreach (var historicalMethod in addedMethodInfo.HistoricalHookedMethods)
+                {
+                    Hook(methodFullName, addedMethodInfo, historicalMethod, wrapperMethod);
+                }
+                
+                addedMethodInfo.HistoricalHookedMethods.Add(wrapperMethod);
             }
         }
     }

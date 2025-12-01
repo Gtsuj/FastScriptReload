@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using FastScriptReload.Runtime;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Mono.Cecil;
@@ -116,36 +117,29 @@ namespace FastScriptReload.Editor
             );
 
             // 找出添加的方法
-            foreach (var newMethodPair in newMethodMap)
+            foreach (var (name, def) in newMethodMap)
             {
-                if (!existingMethodMap.ContainsKey(newMethodPair.Key))
+                if (!existingMethodMap.ContainsKey(name))
                 {
                     // 检查是否是之前新增的方法
-                    if (typeDiff.AddedMethods.TryGetValue(newMethodPair.Key, out var addedMethodInfo))
+                    if (typeDiff.AddedMethods.TryGetValue(name, out var addedMethodInfo))
                     {
                         // 这是一个之前新增的方法，需要比较是否被修改了
                         var previousMethodDef = addedMethodInfo.MethodDefinition;
-                        var isModified = CompareMethodDefinitions(previousMethodDef, newMethodPair.Value);
-
-                        addedMethodInfo.MethodDefinition = newMethodPair.Value;
-                        addedMethodInfo.IsDirty = isModified; // 标记是否有改动
+                        addedMethodInfo.IsDirty = CompareMethodDefinitions(previousMethodDef, def);
                     }
                     else
                     {
-                        addedMethodInfo = new AddedMethodInfo
-                        {
-                            MethodDefinition = newMethodPair.Value,
-                            IsDirty = false // 新方法默认为未修改
-                        };
-                        LoggerScoped.LogDebug($"发现新增的方法: {newMethodPair.Value.FullName}");
+                        addedMethodInfo = new AddedMethodInfo() { IsDirty = true };
+                        LoggerScoped.LogDebug($"发现新增的方法: {name}");
                     }
 
-                    typeDiff.AddedMethods[newMethodPair.Key] = addedMethodInfo;
+                    typeDiff.AddedMethods[name] = addedMethodInfo;
                 }
             }
 
             // 找出修改的方法
-            var methods = existingType.GetMethods(AssemblyChangesLoader.ALL_DECLARED_METHODS_BINDING_FLAGS);
+            var methods = existingType.GetAllMethods().ToArray();
             foreach (var (name, def) in existingMethodMap)
             {
                 if (!newMethodMap.TryGetValue(name, out var newMethodDef))
@@ -157,7 +151,7 @@ namespace FastScriptReload.Editor
                 
                 // 方法修改过，使用修改后的方法定义比较
                 if (typeDiff.ModifiedMethods.TryGetValue(name, out var modifiedMethodInfo))
-                {
+                { 
                     existingMethodDef = modifiedMethodInfo.MethodDefinition;
                 }
 
@@ -165,18 +159,18 @@ namespace FastScriptReload.Editor
                 {
                     continue;
                 }
-                
-                var existingMethodInfo = methods.FirstOrDefault((info => info.FullName().Equals(existingMethodDef.FullName)));
-                if (existingMethodInfo == null)
+
+                if (!typeDiff.ModifiedMethods.TryGetValue(def.FullName, out var modifiedMethod))
                 {
-                    continue;
+                    modifiedMethod = new UpdateMethodInfo
+                    {
+                        OriginalMethod = methods.FirstOrDefault((info => info.FullName().Equals(existingMethodDef.FullName)))
+                    };
+
+                    typeDiff.ModifiedMethods.Add(existingMethodDef.FullName, modifiedMethod);
                 }
 
-                typeDiff.ModifiedMethods[existingMethodDef.FullName] = new UpdateMethodInfo
-                {
-                    ExistingMethod = existingMethodInfo,
-                    MethodDefinition = newMethodDef
-                };
+                modifiedMethod.IsDirty = true;
 
                 LoggerScoped.LogDebug($"发现修改的方法: {existingMethodDef.FullName}");
             }
@@ -218,12 +212,6 @@ namespace FastScriptReload.Editor
 
             // 比较异常处理块数量
             if (existingBody.ExceptionHandlers.Count != newBody.ExceptionHandlers.Count)
-            {
-                return true;
-            }
-
-            // 比较最大栈大小
-            if (existingBody.MaxStackSize != newBody.MaxStackSize)
             {
                 return true;
             }
@@ -271,15 +259,6 @@ namespace FastScriptReload.Editor
             }
 
             if (existingInst.Operand == null || newInst.Operand == null)
-            {
-                return false;
-            }
-
-            // 比较操作数类型
-            var existingType = existingInst.Operand.GetType();
-            var newType = newInst.Operand.GetType();
-
-            if (existingType != newType)
             {
                 return false;
             }

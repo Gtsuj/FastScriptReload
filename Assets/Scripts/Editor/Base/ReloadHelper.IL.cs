@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using FastScriptReload.Runtime;
+using HarmonyLib;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
@@ -46,33 +47,32 @@ namespace FastScriptReload.Editor
                     continue;
                 }
 
-                // 删除冗余方法、添加修改后的方法
-                var methodsToRemove = new List<MethodDefinition>();
-                foreach (var methodDef in typeDef.Methods.ToArray())
+                var methodsToRemove = typeDef.Methods.ToArray();
+                
+                void HandleModifyMethod(string hookMethodName, HookMethodInfo hookMethodInfo)
                 {
-                    HookMethodInfo hookMethodInfo = null;
-                    if (info.ModifiedMethods.TryGetValue(methodDef.FullName, out var modifiedMethod))
-                    {
-                        hookMethodInfo = modifiedMethod;
-                    }
-                    else if (info.AddedMethods.TryGetValue(methodDef.FullName, out var addedMethod))
-                    {
-                        hookMethodInfo = addedMethod;
-                    }
-
-                    if (hookMethodInfo != null)
-                    {
-                        var newMethodDef = ModifyMethod(mainModule, methodDef,
-                            mainModule.ImportReference(info.ExistingType));
-                        typeDef.Methods.Add(newMethodDef);
-
-                        hookMethodInfo.ModifyMethodName = newMethodDef.FullName;
-                    }
-
-                    methodsToRemove.Add(methodDef);
+                    var methodDef = methodsToRemove.FirstOrDefault((definition => definition.FullName == hookMethodName));
+                    
+                    var newMethodDef = ModifyMethod(mainModule, methodDef, mainModule.ImportReference(info.ExistingType));
+                    hookMethodInfo.ModifyMethodName = newMethodDef.FullName;
+                    hookMethodInfo.MethodDefinition = newMethodDef;
+                    
+                    typeDef.Methods.Add(newMethodDef);
                 }
 
-                methodsToRemove.ForEach(method => typeDef.Methods.Remove(method));
+                // 处理添加的方法
+                foreach (var (name, addedMethodInfo) in info.AddedMethods)
+                {
+                    HandleModifyMethod(name, addedMethodInfo);
+                }
+                
+                // 处理修改的方法
+                foreach (var (name, modifiedMethodInfo) in info.ModifiedMethods)
+                {
+                    HandleModifyMethod(name, modifiedMethodInfo);
+                }
+                
+                Array.ForEach(methodsToRemove, method => typeDef.Methods.Remove(method));
 
                 // 清理属性
                 typeDef.Properties.Clear();
@@ -143,7 +143,7 @@ namespace FastScriptReload.Editor
             newMethodDef.ReturnType = GetOriginalType(module, methodDef.ReturnType, genericParamMap);
 
             // 将@this参数加入到方法参数列表的头部
-            if (!methodDef.IsStatic && !methodDef.IsConstructor)
+            if (!methodDef.IsStatic)
             {
                 newMethodDef.Parameters.Insert(0,
                     new ParameterDefinition("@this", ParameterAttributes.None, originalTypeRef));
@@ -166,6 +166,8 @@ namespace FastScriptReload.Editor
                 var variableType = GetOriginalType(module, variable.VariableType, genericParamMap);
                 newMethodDef.Body.Variables.Add(new VariableDefinition(variableType));
             }
+            
+            newMethodDef.Body.MaxStackSize = methodDef.Body.MaxStackSize;
 
             // 创建所有指令
             var sourceInstructions = methodDef.Body.Instructions.ToList();
@@ -213,9 +215,17 @@ namespace FastScriptReload.Editor
 
             if (sourceInst.Operand is FieldReference fieldRef)
             {
-                fieldRef = new FieldReference(fieldRef.Name,
-                    GetOriginalType(module, fieldRef.FieldType, genericParamMap),
-                    GetOriginalType(module, fieldRef.DeclaringType, genericParamMap));
+                var newFieldType = GetOriginalType(module, fieldRef.FieldType, genericParamMap);
+                var newDeclaringType = GetOriginalType(module, fieldRef.DeclaringType, genericParamMap);
+                if (fieldRef.DeclaringType == null)
+                {
+                    fieldRef = new FieldReference(fieldRef.Name, newFieldType);
+                }
+                else
+                {
+                    fieldRef = new FieldReference(fieldRef.Name, newFieldType, newDeclaringType);
+                }
+
                 return Instruction.Create(sourceInst.OpCode, fieldRef);
             }
 
@@ -225,7 +235,8 @@ namespace FastScriptReload.Editor
                 if (HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookType)
                     && hookType.AddedMethods.TryGetValue(methodRef.FullName, out var addedMethodInfo))
                 {
-                    return Instruction.Create(sourceInst.OpCode, module.ImportReference(addedMethodInfo.CurrentMethod));
+                    methodRef = module.ImportReference(addedMethodInfo.MethodDefinition);
+                    return Instruction.Create(sourceInst.OpCode, methodRef);
                 }
 
                 var originalMethodRef = GetOriginalMethodReference(module, methodRef);
