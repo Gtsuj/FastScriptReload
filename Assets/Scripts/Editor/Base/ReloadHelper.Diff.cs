@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using FastScriptReload.Runtime;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Mono.Cecil;
@@ -19,7 +18,7 @@ namespace FastScriptReload.Editor
         /// </summary>
         /// <param name="changeFiles">修改的文件路径列表</param>
         /// <returns>程序集差异结果</returns>
-        public static List<HookTypeInfo> DiffAssembly(List<string> changeFiles)
+        public static void DiffAssembly(List<string> changeFiles)
         {
             // 从内存流读取程序集定义
             AssemblyDefinition newAssemblyDef = _assemblyDefinition;
@@ -30,12 +29,12 @@ namespace FastScriptReload.Editor
             if (typeToFilePathMap.Count == 0)
             {
                 LoggerScoped.LogWarning("未能从修改的文件中提取到任何类型");
-                return null;
+                return;
             }
 
             LoggerScoped.LogDebug($"从 {changeFiles.Count} 个文件中提取到 {typeToFilePathMap.Count} 个类型: {string.Join(", ", typeToFilePathMap.Keys)}");
 
-            var hookTypeInfos = new List<HookTypeInfo>();
+            // var hookTypeInfos = new List<HookTypeInfo>();
             
             // 步骤2: 使用获取到的完整类型从编译出的Assembly中进行Diff
             foreach (var kvp in typeToFilePathMap)
@@ -54,57 +53,47 @@ namespace FastScriptReload.Editor
                 // 查找原有类型（使用反射）
                 if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeFullName, out var existingType))
                 {
-                    var typeDiff = CompareTypesWithCecil(existingType, newTypeDef);
-                    if (typeDiff != null)
-                    {
-                        typeDiff.SourceFilePaths = filePaths;
-                        hookTypeInfos.Add(typeDiff);
-                    }
+                    CompareTypesWithCecil(existingType, newTypeDef, filePaths);
                 }
-                else
-                {
-                    // 新添加的类型（不在原有程序集中）
-                    LoggerScoped.LogDebug($"类型 {typeFullName} 是新添加的类型，不在原有程序集中");
-                }
-
             }
-
-            return hookTypeInfos;
         }
 
         /// <summary>
         /// 使用 Mono.Cecil 比较两个类型的方法差异
         /// </summary>
-        private static HookTypeInfo CompareTypesWithCecil(Type existingType, TypeDefinition newTypeDef)
+        private static void CompareTypesWithCecil(Type existingType, TypeDefinition newTypeDef, HashSet<string> filePaths)
         {
-            if (!HookTypeInfoCache.TryGetValue(existingType.FullName, out var typeDiff))
+            if (!HookTypeInfoCache.TryGetValue(existingType.FullName!, out var typeDiff))
             {
                 typeDiff = new HookTypeInfo
                 {
                     TypeFullName = existingType.FullName,
                     ExistingType = existingType,
-                    NewTypeDefinition = newTypeDef // 保存新类型定义
+                    NewTypeDefinition = newTypeDef,
+                    SourceFilePaths = filePaths
                 };
+
+                HookTypeInfoCache.Add(existingType.FullName, typeDiff);
             }
         
             var existingAssemblyPath = existingType.Assembly?.Location;
             if (string.IsNullOrEmpty(existingAssemblyPath))
             {
                 LoggerScoped.LogDebug($"无法读取原有程序集路径: {existingAssemblyPath}");
-                return null;
+                return;
             }
 
             var existingAssemblyDef = GetOrReadAssemblyDefinition(existingAssemblyPath);
             if (existingAssemblyDef == null)
             {
                 LoggerScoped.LogDebug($"无法读取原有程序集: {existingAssemblyPath}");
-                return null;
+                return;
             }
             var existingTypeDef = existingAssemblyDef.MainModule.Types.FirstOrDefault(t => t.FullName == existingType.FullName);
 
             if (existingTypeDef == null)
             {
-                return null;
+                return;
             }
 
             // 创建方法签名到方法的映射
@@ -179,12 +168,27 @@ namespace FastScriptReload.Editor
                 LoggerScoped.LogDebug($"发现修改的方法: {existingMethodDef.FullName}");
             }
 
-            if (!isModified)
+            // 比较字段：找出新增的字段
+            var existingFieldMap = existingTypeDef.Fields.ToDictionary(
+                f => f.Name, f => f
+            );
+
+            var newFieldMap = newTypeDef.Fields.ToDictionary(
+                f => f.Name, f => f
+            );
+
+            foreach (var (fieldName, newFieldDef) in newFieldMap)
             {
-                return null;
+                if (!existingFieldMap.ContainsKey(fieldName))
+                {
+                    // 发现新增字段
+                    typeDiff.AddedFields[newFieldDef.FullName] = newFieldDef;
+                    isModified = true; // 有新增字段也算修改
+                }
             }
 
-            return typeDiff;
+            // 设置脏标记
+            typeDiff.IsDirty = isModified;
         }
 
         /// <summary>
