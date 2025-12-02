@@ -41,13 +41,20 @@ namespace FastScriptReload.Editor
         public Dictionary<string, AddedMethodInfo> AddedMethods { get; } = new ();
 
         /// <summary>
-        /// 删除的方法列表
-        /// </summary>
-        public List<MethodInfo> RemovedMethods { get; } = new ();
-
-        /// <summary>
-        /// 修改的方法列表（方法签名相同，但方法体可能不同）
+        /// 修改的方法列表
         /// </summary>
         public Dictionary<string, UpdateMethodInfo> ModifiedMethods { get; } = new ();
+
+        /// <summary>
+        /// 新增的字段信息
+        /// Key: 字段全名
+        /// Value: 字段定义信息
+        /// </summary>
+        public Dictionary<string, FieldDefinition> AddedFields { get; } = new ();
+
+        /// <summary>
+        /// 是否被修改（dirty标记）
+        /// </summary>
+        public bool IsDirty { get; set; }
     }
 }

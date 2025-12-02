@@ -582,16 +582,9 @@ namespace FastScriptReload.Editor
                         }
 
                         // 比较原类型和修改后的类型（使用全局缓存的解析选项）
-                        var hookTypeInfos = ReloadHelper.DiffAssembly(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
-                        if (hookTypeInfos == null || hookTypeInfos.Count == 0)
-                        {
-                            return;
-                        }
+                        ReloadHelper.DiffAssembly(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
 
-                        foreach (var hookTypeInfo in hookTypeInfos)
-                        {
-                            ReloadHelper.HookTypeInfoCache[hookTypeInfo.TypeFullName] = hookTypeInfo;
-                        }
+                        List<HookTypeInfo> hookTypeInfos = ReloadHelper.HookTypeInfoCache.Values.Where(info => info.IsDirty).ToList();
 
                         // 删除冗余部分，将改动的方法转换为静态方法
                         var assemblyPath = ReloadHelper.ModifyCompileAssembly(hookTypeInfos);

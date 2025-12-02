@@ -30,28 +30,16 @@ namespace FastScriptReload.Editor
             var templateAssembly = _assemblyDefinition;
             var mainModule = templateAssembly.MainModule;
 
-            // 清理程序集和模块级别的特性（删除编译器生成的特性）
-            var compilerNamespaces = new[] { "System.Runtime.CompilerServices", "Microsoft.CodeAnalysis" };
-            // 清理模块级别的特性
-            CleanupAttributesByNamespace(mainModule.CustomAttributes, compilerNamespaces);
-            // 清理程序集级别的特性
-            CleanupAttributesByNamespace(mainModule.Assembly.CustomAttributes, compilerNamespaces);
-
-            foreach (var typeDef in mainModule.Types.ToArray())
+            foreach (var typeDef in mainModule.Types)
             {
-                // 删除没有Hook的类型
-                var info = hookTypeInfos.FirstOrDefault((info => info.TypeFullName == typeDef.FullName));
-                if (info == null)
+                if (!HookTypeInfoCache.TryGetValue(typeDef.FullName, out var info) || !info.IsDirty)
                 {
-                    mainModule.Types.Remove(typeDef);
                     continue;
                 }
 
-                var methodsToRemove = typeDef.Methods.ToArray();
-                
                 void HandleModifyMethod(string hookMethodName, HookMethodInfo hookMethodInfo)
                 {
-                    var methodDef = methodsToRemove.FirstOrDefault((definition => definition.FullName == hookMethodName));
+                    var methodDef = typeDef.Methods.FirstOrDefault((definition => definition.FullName == hookMethodName));
                     if (methodDef == null)
                     {
                         return;
@@ -75,13 +63,9 @@ namespace FastScriptReload.Editor
                 {
                     HandleModifyMethod(name, modifiedMethodInfo);
                 }
-                
-                Array.ForEach(methodsToRemove, method => typeDef.Methods.Remove(method));
-
-                // 清理属性
-                typeDef.Properties.Clear();
-                typeDef.Fields.Clear();
             }
+
+            ClearAssembly(mainModule);
 
             // 添加必要的引用
             AddRequiredReferences(templateAssembly, hookTypeInfos);
@@ -102,13 +86,68 @@ namespace FastScriptReload.Editor
             // 设置每个类型的程序集路径
             foreach (var typeDiff in hookTypeInfos)
             {
-                if (typeDiff.ModifiedMethods.Count > 0 || typeDiff.AddedMethods.Count > 0)
-                {
-                    typeDiff.WrapperAssemblyPath = filePath;
-                }
+                typeDiff.WrapperAssemblyPath = filePath;
             }
 
             return filePath;
+        }
+
+        private static void ClearAssembly(ModuleDefinition mainModule)
+        {
+            void CleanupAttributesByNamespace(ICollection<CustomAttribute> attributes, string[] compilerNamespaces)
+            {
+                foreach (var attr in attributes.ToArray())
+                {
+                    var attrNamespace = attr.AttributeType.Namespace ?? string.Empty;
+                    if (!string.IsNullOrEmpty(compilerNamespaces.FirstOrDefault(s => attrNamespace.Equals(s) || attrNamespace.StartsWith($"{s}."))))
+                    {
+                        attributes.Remove(attr);
+                    }
+                }
+            }
+            
+            // 清理程序集和模块级别的特性（删除编译器生成的特性）
+            var compilerNamespaces = new[] { "System.Runtime.CompilerServices", "Microsoft.CodeAnalysis" };
+            // 清理模块级别的特性
+            CleanupAttributesByNamespace(mainModule.CustomAttributes, compilerNamespaces);
+            // 清理程序集级别的特性
+            CleanupAttributesByNamespace(mainModule.Assembly.CustomAttributes, compilerNamespaces);            
+
+            // 统一清理程序集
+            foreach (var typeDef in mainModule.Types.ToArray())
+            {
+                // 删除没有Hook的类型
+                if (!HookTypeInfoCache.TryGetValue(typeDef.FullName, out var info) || !info.IsDirty)
+                {
+                    mainModule.Types.Remove(typeDef);
+                    continue;
+                }
+
+                // 删除没有被Hook的方法
+                foreach (var methodDef in typeDef.Methods.ToArray())
+                {
+                    if (info.ModifiedMethods.Values.FirstOrDefault((methodInfo => methodInfo.ModifyMethodName == methodDef.FullName)) != null 
+                        || info.AddedMethods.Values.FirstOrDefault((methodInfo => methodInfo.ModifyMethodName == methodDef.FullName)) != null)
+                    {
+                        continue;
+                    }
+
+                    typeDef.Methods.Remove(methodDef);
+                }
+
+                // 删除没有被Hook的字段
+                foreach (var fieldDef in typeDef.Fields.ToArray())
+                {
+                    if (info.AddedFields.TryGetValue(fieldDef.FullName, out var addedFieldInfo))
+                    {
+                        continue;
+                    }
+                    
+                    typeDef.Fields.Remove(fieldDef);
+                }
+                
+                typeDef.Properties.Clear();
+            }
         }
 
         private static MethodDefinition ModifyMethod(ModuleDefinition module, MethodDefinition methodDef, TypeReference originalTypeRef)
@@ -268,37 +307,6 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
-        /// 根据命名空间清理自定义属性
-        /// </summary>
-        private static void CleanupAttributesByNamespace(ICollection<CustomAttribute> attributes, string[] compilerNamespaces)
-        {
-            if (attributes == null) return;
-
-            var attributesToRemove = new List<CustomAttribute>();
-            foreach (var attr in attributes)
-            {
-                if (attr?.AttributeType == null) continue;
-
-                var attrNamespace = attr.AttributeType.Namespace ?? string.Empty;
-
-                // 检查自定义属性的命名空间是否匹配要删除的命名空间
-                foreach (var compilerNamespace in compilerNamespaces)
-                {
-                    if (attrNamespace == compilerNamespace || attrNamespace.StartsWith(compilerNamespace + "."))
-                    {
-                        attributesToRemove.Add(attr);
-                        break;
-                    }
-                }
-            }
-
-            foreach (var attr in attributesToRemove)
-            {
-                attributes.Remove(attr);
-            }
-        }
-
-        /// <summary>
         /// 添加必要的程序集引用
         /// </summary>
         private static void AddRequiredReferences(AssemblyDefinition wrapperAssembly, List<HookTypeInfo> hookTypeInfos)
@@ -409,7 +417,7 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
-        /// 获取原类型引用（将template类型替换为原类型）
+        /// 获取原类型引用
         /// </summary>
         private static TypeReference GetOriginalType(ModuleDefinition module, TypeReference operandTypeRef,
             Dictionary<GenericParameter, GenericParameter> genericParamMap = null)
