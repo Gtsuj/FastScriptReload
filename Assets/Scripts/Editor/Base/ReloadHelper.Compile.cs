@@ -29,7 +29,7 @@ namespace FastScriptReload.Editor
                     .ToHashSet();
 
                 filesToCompile.UnionWith(HookTypeInfoCache.Values
-                    .Where(hookTypeInfo => hookTypeInfo.AddedMethods.Count > 0)
+                    .Where(hookTypeInfo => hookTypeInfo.AddedMethods.Count > 0 || hookTypeInfo.AddedFields.Count > 0)
                     .SelectMany(hookTypeInfo => hookTypeInfo.SourceFilePaths));
 
                 var syntaxTrees = new List<SyntaxTree>();

@@ -33,6 +33,17 @@ namespace FastScriptReload.Runtime
             F = initialValue;
         }
 
+        /// <summary>
+        /// 获取字段 F 的引用
+        /// 用于支持 ldflda 指令（取字段地址）
+        /// 示例：ref int fieldRef = ref holder.GetRef();
+        /// </summary>
+        /// <returns>字段 F 的托管引用</returns>
+        public ref T GetRef()
+        {
+            return ref F;
+        }
+
         public override string ToString()
         {
             return $"FieldHolder<{typeof(T).Name}>[{F}]";
@@ -47,45 +58,49 @@ namespace FastScriptReload.Runtime
     public static class FieldResolver<TOwner>
     {
         /// <summary>
-        /// 全局存储：实例 → (字段名 → FieldHolder)
+        /// 实例字段存储：实例 → (字段名 → FieldHolder)
         /// 使用 ConditionalWeakTable 确保实例被 GC 时，字段数据也能被回收
         /// </summary>
-        private static readonly ConditionalWeakTable<object, Dictionary<string, object>> 
-            _instanceFieldStorage = new ConditionalWeakTable<object, Dictionary<string, object>>();
+        private static readonly ConditionalWeakTable<object, Dictionary<string, object>> _instanceFieldStorage = new ();
+
+        /// <summary>
+        /// 静态字段存储：字段名 → FieldHolder
+        /// 静态字段不依赖实例，直接存储在类型级别
+        /// </summary>
+        private static readonly Dictionary<string, object> _staticFieldStorage = new ();
 
         /// <summary>
         /// 字段初始化器：字段名 → 初始化函数
         /// 用于在首次访问字段时提供初始值
         /// </summary>
-        private static readonly Dictionary<string, Func<object>> 
-            _fieldInitializers = new Dictionary<string, Func<object>>();
-
-        /// <summary>
-        /// 注册字段初始化器
-        /// </summary>
-        /// <param name="fieldName">字段名</param>
-        /// <param name="initializer">初始化函数</param>
-        public static void RegisterFieldInitializer(string fieldName, Func<object> initializer)
-        {
-            _fieldInitializers[fieldName] = initializer;
-        }
+        private static readonly Dictionary<string, Func<object>> _fieldInitializers = new ();
+        
 
         /// <summary>
         /// 获取字段持有者 - 核心方法
-        /// 从全局存储中获取或创建 FieldHolder<TField>
+        /// 从全局存储中获取或创建 FieldHolder<TField />
         /// </summary>
         /// <typeparam name="TField">字段类型</typeparam>
-        /// <param name="instance">对象实例</param>
+        /// <param name="instance">对象实例（静态字段传 null）</param>
         /// <param name="fieldName">字段名称</param>
         /// <returns>字段持有者</returns>
         public static FieldHolder<TField> GetHolder<TField>(object instance, string fieldName)
         {
+            // 静态字段：instance 为 null
             if (instance == null)
             {
-                throw new ArgumentNullException(nameof(instance), 
-                    $"无法获取字段 '{fieldName}' 的持有者：实例为 null");
+                return GetStaticFieldHolder<TField>(fieldName);
             }
 
+            // 实例字段：正常处理
+            return GetInstanceFieldHolder<TField>(instance, fieldName);
+        }
+
+        /// <summary>
+        /// 获取实例字段持有者
+        /// </summary>
+        private static FieldHolder<TField> GetInstanceFieldHolder<TField>(object instance, string fieldName)
+        {
             // 获取实例的字段存储字典
             Dictionary<string, object> fieldsDict;
             
@@ -104,26 +119,7 @@ namespace FastScriptReload.Runtime
                 if (!fieldsDict.TryGetValue(fieldName, out var holderObj))
                 {
                     // 首次访问，创建 FieldHolder
-                    var holder = new FieldHolder<TField>();
-
-                    // 如果有初始化器，使用初始化器提供的值
-                    if (_fieldInitializers.TryGetValue(fieldName, out var initializer))
-                    {
-                        try
-                        {
-                            var initialValue = initializer();
-                            if (initialValue != null)
-                            {
-                                holder.F = (TField)initialValue;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            ImmersiveVrToolsCommon.Runtime.Logging.LoggerScoped.LogWarning(
-                                $"字段 '{fieldName}' 初始化失败: {ex.Message}，使用默认值");
-                        }
-                    }
-
+                    var holder = CreateFieldHolder<TField>(fieldName);
                     fieldsDict[fieldName] = holder;
                     return holder;
                 }
@@ -148,8 +144,69 @@ namespace FastScriptReload.Runtime
         }
 
         /// <summary>
-        /// 存储字段值（可选方法，实际可以直接通过 holder.f 赋值）
-        /// 提供此方法是为了保持 API 完整性
+        /// 获取静态字段持有者
+        /// </summary>
+        private static FieldHolder<TField> GetStaticFieldHolder<TField>(string fieldName)
+        {
+            lock (_staticFieldStorage)
+            {
+                if (!_staticFieldStorage.TryGetValue(fieldName, out var holderObj))
+                {
+                    // 首次访问，创建 FieldHolder
+                    var holder = CreateFieldHolder<TField>(fieldName);
+                    _staticFieldStorage[fieldName] = holder;
+                    return holder;
+                }
+
+                // 类型检查
+                if (holderObj is FieldHolder<TField> typedHolder)
+                {
+                    return typedHolder;
+                }
+                else
+                {
+                    // 类型不匹配，可能是字段类型被修改了
+                    ImmersiveVrToolsCommon.Runtime.Logging.LoggerScoped.LogError(
+                        $"静态字段 '{fieldName}' 类型不匹配: 期望 {typeof(TField).Name}，实际 {holderObj?.GetType().Name}");
+                    
+                    // 创建新的 FieldHolder 并替换
+                    var newHolder = new FieldHolder<TField>();
+                    _staticFieldStorage[fieldName] = newHolder;
+                    return newHolder;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 创建字段持有者并应用初始化器
+        /// </summary>
+        private static FieldHolder<TField> CreateFieldHolder<TField>(string fieldName)
+        {
+            var holder = new FieldHolder<TField>();
+
+            // 如果有初始化器，使用初始化器提供的值
+            if (_fieldInitializers.TryGetValue(fieldName, out var initializer))
+            {
+                try
+                {
+                    var initialValue = initializer();
+                    if (initialValue != null)
+                    {
+                        holder.F = (TField)initialValue;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ImmersiveVrToolsCommon.Runtime.Logging.LoggerScoped.LogWarning(
+                        $"字段 '{fieldName}' 初始化失败: {ex.Message}，使用默认值");
+                }
+            }
+
+            return holder;
+        }
+
+        /// <summary>
+        /// 存储实例字段值
         /// </summary>
         /// <typeparam name="TField">字段类型</typeparam>
         /// <param name="instance">对象实例</param>
@@ -162,17 +219,15 @@ namespace FastScriptReload.Runtime
         }
 
         /// <summary>
-        /// 获取字段值（可选方法，实际可以直接通过 holder.f 访问）
-        /// 提供此方法是为了 API 完整性和调试
+        /// 存储静态字段值（方法重载）
         /// </summary>
         /// <typeparam name="TField">字段类型</typeparam>
-        /// <param name="instance">对象实例</param>
+        /// <param name="value">字段值</param>
         /// <param name="fieldName">字段名称</param>
-        /// <returns>字段值</returns>
-        public static TField Get<TField>(object instance, string fieldName)
+        public static void Store<TField>(TField value, string fieldName)
         {
-            var holder = GetHolder<TField>(instance, fieldName);
-            return holder.F;
+            var holder = GetHolder<TField>(null, fieldName);
+            holder.F = value;
         }
 
         /// <summary>
@@ -215,16 +270,6 @@ namespace FastScriptReload.Runtime
                     fieldsDict.Clear();
                 }
             }
-        }
-
-        /// <summary>
-        /// 获取统计信息（用于调试）
-        /// </summary>
-        public static string GetStatistics()
-        {
-            // ConditionalWeakTable 无法直接获取条目数，只能估算
-            return $"FieldResolver<{typeof(TOwner).Name}>: " +
-                   $"已注册初始化器数量 = {_fieldInitializers.Count}";
         }
     }
 }
