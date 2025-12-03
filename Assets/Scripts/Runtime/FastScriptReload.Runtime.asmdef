@@ -10,7 +10,7 @@
         "0Harmony.dll",
         "ImmersiveVRTools.Common.Runtime.dll"
     ],
-    "autoReferenced": false,
+    "autoReferenced": true,
     "defineConstraints": [
         "UNITY_EDITOR || LiveScriptReload_IncludeInBuild_Enabled"
     ],
