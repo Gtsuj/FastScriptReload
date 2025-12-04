@@ -50,7 +50,7 @@ namespace FastScriptReload.Editor
         /// Key: 字段全名
         /// Value: 字段定义信息
         /// </summary>
-        public Dictionary<string, FieldDefinition> AddedFields { get; } = new ();
+        public Dictionary<string, HookFieldInfo> AddedFields { get; } = new ();
 
         /// <summary>
         /// 是否被修改（dirty标记）
