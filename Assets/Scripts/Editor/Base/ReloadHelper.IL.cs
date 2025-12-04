@@ -132,12 +132,13 @@ namespace FastScriptReload.Editor
                 // 删除没有被Hook的字段
                 foreach (var fieldDef in typeDef.Fields.ToArray())
                 {
-                    if (info.AddedFields.TryGetValue(fieldDef.FullName, out var addedFieldInfo))
+                    if (!info.AddedFields.TryGetValue(fieldDef.FullName, out var addedFieldInfo) || !addedFieldInfo.IsDirty)
                     {
+                        typeDef.Fields.Remove(fieldDef);
                         continue;
                     }
-                    
-                    typeDef.Fields.Remove(fieldDef);
+
+                    addedFieldInfo.IsDirty = false;
                 }
                 
                 typeDef.Properties.Clear();

@@ -182,8 +182,16 @@ namespace FastScriptReload.Editor
                 if (!existingFieldMap.ContainsKey(fieldName))
                 {
                     // 发现新增字段
-                    typeDiff.AddedFields[newFieldDef.FullName] = newFieldDef;
-                    isModified = true; // 有新增字段也算修改
+                    if (!typeDiff.AddedFields.ContainsKey(newFieldDef.FullName))
+                    {
+                        typeDiff.AddedFields.Add(newFieldDef.FullName, new HookFieldInfo()
+                        {
+                            FieldType = newFieldDef,
+                            IsDirty = true,
+                        });
+
+                        isModified = true; // 有新增字段也算修改
+                    }
                 }
             }
 
