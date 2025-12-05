@@ -572,7 +572,7 @@ namespace FastScriptReload.Editor
 
                         // 编译改动的C#文件
                         var result = ReloadHelper.CompileCsFiles(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
-                        if (!result)
+                        if (result == null)
                         {
                             changesAwaitingHotReload.ForEach(c =>
                             {
