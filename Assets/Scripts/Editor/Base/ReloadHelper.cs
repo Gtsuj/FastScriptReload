@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
@@ -61,8 +62,14 @@ namespace FastScriptReload.Editor
                 return;
             }
 
-            await TypeSourceIndex.EnsureInitialized();
+            var scriptPaths = Directory.GetFiles(Application.dataPath, "*.cs", SearchOption.AllDirectories).ToList();
+            DiffAnalyzerHelper.SaveFileSnapshots(scriptPaths);
 
+            await TypeSourceIndex.EnsureInitialized();
+            
+            // // 收集所有类型信息
+            await TypeInfoCollector.EnsureInitialized();
+            
             // 获取工程名
             var projectName = Path.GetFileName(Path.GetDirectoryName(Application.dataPath));
             if (string.IsNullOrEmpty(projectName))
