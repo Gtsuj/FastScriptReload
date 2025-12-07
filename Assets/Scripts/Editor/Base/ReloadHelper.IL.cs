@@ -24,6 +24,102 @@ namespace FastScriptReload.Editor
     {
         #region 核心方法
 
+        public static string ModifyCompileAssembly(Dictionary<string, DiffResult> results)
+        {
+            var templateAssembly = _assemblyDefinition;
+            var mainModule = templateAssembly.MainModule;
+            
+            foreach (var typeDef in mainModule.Types)
+            {
+                if (!results.TryGetValue(typeDef.FullName, out DiffResult result))
+                {
+                    continue;
+                }
+
+                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeDef.FullName, out var existingType))
+                {
+                    continue;
+                }
+                
+                if (!HookTypeInfoCache.TryGetValue(existingType.FullName!, out var hookTypeInfo))
+                {
+                    hookTypeInfo = new HookTypeInfo
+                    {
+                        TypeFullName = existingType.FullName,
+                        ExistingType = existingType,
+                    };
+
+                    HookTypeInfoCache.Add(existingType.FullName, hookTypeInfo);
+                }
+                
+                void HandleModifyMethod(string hookMethodName, HookMethodInfo hookMethodInfo)
+                {
+                    var methodDef = typeDef.Methods.FirstOrDefault((definition => definition.FullName == hookMethodName));
+                    if (methodDef == null)
+                    {
+                        return;
+                    }
+
+                    var newMethodDef = ModifyMethod(mainModule, methodDef, mainModule.ImportReference(existingType));
+                    hookMethodInfo.ModifyMethodName = newMethodDef.FullName;
+                    hookMethodInfo.MethodDefinition = newMethodDef;
+                    
+                    typeDef.Methods.Add(newMethodDef);
+                }
+                
+                // 处理添加的方法
+                foreach (var addedMethodInfo in result.AddedMethods)
+                {
+                    if (!hookTypeInfo.AddedMethods.TryGetValue(addedMethodInfo.FullName, out var methodInfo))
+                    {
+                        methodInfo = new AddedMethodInfo { IsDirty = true, };
+                        hookTypeInfo.AddedMethods.Add(addedMethodInfo.FullName, methodInfo);
+                    }
+                    HandleModifyMethod(addedMethodInfo.FullName, methodInfo);
+                }
+                
+                // 处理修改的方法
+                foreach (var modifiedMethodInfo in result.ModifiedMethods)
+                {
+                    if (!hookTypeInfo.ModifiedMethods.TryGetValue(modifiedMethodInfo.FullName, out var methodInfo))
+                    {
+                        methodInfo = new UpdateMethodInfo
+                        {
+                            IsDirty = true,
+                            OriginalMethod = existingType.GetAllMethods().FirstOrDefault((info => info.FullName().Equals(modifiedMethodInfo.FullName)))
+                        };
+                        hookTypeInfo.ModifiedMethods.Add(modifiedMethodInfo.FullName, methodInfo);
+                    }
+                    HandleModifyMethod(modifiedMethodInfo.FullName, methodInfo);
+                }
+            }
+            // ClearAssembly(mainModule);
+
+            // 添加必要的引用
+            AddRequiredReferences(templateAssembly, HookTypeInfoCache.Values.ToList());
+
+            // 生成文件名并保存
+            var filePath = Path.Combine(AssemblyPath,
+                $"{_assemblyDefinition.Name.Name}.dll");
+
+            // 确保目录存在
+            var directory = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            templateAssembly.Write(filePath);
+
+            // 设置每个类型的程序集路径
+            foreach (var (_, typeDiff) in HookTypeInfoCache)
+            {
+                typeDiff.WrapperAssemblyPath = filePath;
+            }
+
+            return filePath;
+        }
+
         /// <summary>
         /// 修改编译后的程序集
         /// </summary>

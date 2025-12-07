@@ -27,13 +27,27 @@ namespace FastScriptReload.Editor
                 var filesToCompile = new HashSet<string>(csFilePaths);
                 var syntaxTrees = new Dictionary<string, SyntaxTree>();
                 
+                csFilePaths.ForEach(filePath => syntaxTrees.Add(filePath, GetSyntaxTree(filePath)));
+                
+                // 创建编译（合并所有文件到一个程序集）
+                var compilation = CSharpCompilation.Create(
+                    assemblyName: Guid.NewGuid().ToString("N"),
+                    syntaxTrees: syntaxTrees.Values,
+                    references: GetOrResolveAssemblyReferences(),
+                    options: new CSharpCompilationOptions(
+                        OutputKind.DynamicallyLinkedLibrary,
+                        optimizationLevel: OptimizationLevel.Debug,
+                        allowUnsafe: true
+                    )
+                );
+                
                 // Key: 类型全名
                 var typeDiffs = new Dictionary<string, DiffResult>();
                 
                 // 收集改动文件的差异
-                foreach (var csFilePath in csFilePaths)
+                foreach (var (_, syntaxTree) in syntaxTrees)
                 {
-                    DiffAnalyzerHelper.AnalyzeDiff(csFilePath, typeDiffs);
+                    DiffAnalyzerHelper.AnalyzeDiff(compilation, syntaxTree, typeDiffs);
                 }
 
                 if (typeDiffs.Count == 0)
@@ -76,6 +90,10 @@ namespace FastScriptReload.Editor
                 foreach (var (typeName, _) in typeDiffs)
                 {
                     var info = TypeInfoCollector.GetTypeInfo(typeName);
+                    if (info == null)
+                    {
+                        continue;
+                    }
                     filesToCompile.Add(info.FilePath);
                     foreach (var infoPartialFile in info.PartialFiles)
                     {
@@ -84,35 +102,27 @@ namespace FastScriptReload.Editor
                 }
                 
                 // 将新增过方法、字段的类也默认加入编译
-                foreach (var (_, hookTypeInfo) in HookTypeInfoCache)
+                foreach (var (typeName, hookTypeInfo) in HookTypeInfoCache)
                 {
                     if (!(hookTypeInfo.AddedMethods.Count > 0 || hookTypeInfo.AddedFields.Count > 0))
                     {
                         continue;
                     }
 
-                    foreach (var filePath in hookTypeInfo.SourceFilePaths)
+                    var typeInfo = TypeInfoCollector.GetTypeInfo(typeName);
+                    filesToCompile.Add(typeInfo.FilePath);
+                    foreach (var filePath in typeInfo.PartialFiles)
                     {
                         filesToCompile.Add(filePath);
                     }
                 }
 
-                foreach (var filePath in filesToCompile)
-                {
-                    syntaxTrees.Add(filePath, GetSyntaxTree(filePath));
-                }
+                // foreach (var filePath in filesToCompile)
+                // {
+                //     syntaxTrees.Add(filePath, GetSyntaxTree(filePath));
+                // }
                 
-                // 创建编译（合并所有文件到一个程序集）
-                var compilation = CSharpCompilation.Create(
-                    assemblyName: Guid.NewGuid().ToString("N"),
-                    syntaxTrees: syntaxTrees.Values,
-                    references: GetOrResolveAssemblyReferences(),
-                    options: new CSharpCompilationOptions(
-                        OutputKind.DynamicallyLinkedLibrary,
-                        optimizationLevel: OptimizationLevel.Debug,
-                        allowUnsafe: true
-                    )
-                );
+
 
                 // 检查编译文件中是否有调用internal成员
                 foreach (var csFilePath in filesToCompile)

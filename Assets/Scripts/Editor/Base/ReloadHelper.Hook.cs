@@ -18,10 +18,10 @@ namespace FastScriptReload.Editor
         /// Hook成功后保存到全局容器中
         /// </summary>
         /// <param name="hookTypeInfos">程序集差异结果</param>
-        public static void ApplyHooks(List<HookTypeInfo> hookTypeInfos)
+        public static void ApplyHooks()
         {
             // 直接遍历所有类型差异，应用Hook
-            foreach (var typeInfo in hookTypeInfos)
+            foreach (var (_, typeInfo) in ReloadHelper.HookTypeInfoCache)
             {
                 // 从路径获取程序集名称
                 var assemblyName = System.IO.Path.GetFileNameWithoutExtension(typeInfo.WrapperAssemblyPath);
