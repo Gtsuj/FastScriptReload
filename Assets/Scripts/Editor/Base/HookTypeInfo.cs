@@ -19,11 +19,6 @@ namespace FastScriptReload.Editor
         /// 原有类型
         /// </summary>
         public Type ExistingType { get; set; }
-
-        /// <summary>
-        /// 新类型定义（Mono.Cecil）
-        /// </summary>
-        public TypeDefinition NewTypeDefinition { get; set; }
         
         /// <summary>
         /// 当前Wrapper程序集路径
@@ -31,30 +26,26 @@ namespace FastScriptReload.Editor
         public string WrapperAssemblyPath { get; set; }        
 
         /// <summary>
-        /// 源代码所在文件
-        /// </summary>
-        public HashSet<string> SourceFilePaths { get; set; } = new ();
-
-        /// <summary>
-        /// 新增的方法信息（包含方法定义和历史Hook信息）
-        /// </summary>
-        public Dictionary<string, AddedMethodInfo> AddedMethods { get; } = new ();
-
-        /// <summary>
         /// 修改的方法列表
         /// </summary>
-        public Dictionary<string, UpdateMethodInfo> ModifiedMethods { get; } = new ();
+        public Dictionary<string, HookMethodInfo> ModifiedMethods { get; } = new ();
 
         /// <summary>
         /// 新增的字段信息
         /// Key: 字段全名
         /// Value: 字段定义信息
         /// </summary>
-        public Dictionary<string, HookFieldInfo> AddedFields { get; } = new ();
+        public Dictionary<string, FieldDefinition> AddedFields { get; } = new ();
 
         /// <summary>
-        /// 是否被修改（dirty标记）
+        /// 尝试获取新增的方法
         /// </summary>
-        public bool IsDirty { get; set; }
+        /// <param name="fullName">方法全名</param>
+        /// <param name="methodInfo">方法定义信息</param>
+        /// <returns>是否成功</returns>
+        public bool TryGetAddedMethod(string fullName, out HookMethodInfo methodInfo)
+        {
+            return ModifiedMethods.TryGetValue(fullName, out methodInfo) && methodInfo.HookMethodState == HookMethodState.Added;
+        }
     }
 }

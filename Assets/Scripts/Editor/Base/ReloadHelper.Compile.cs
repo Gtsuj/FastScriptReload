@@ -6,6 +6,7 @@ using FastScriptReload.Editor.Compilation.CodeRewriting;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Mono.Cecil;
 
 namespace FastScriptReload.Editor
@@ -24,84 +25,10 @@ namespace FastScriptReload.Editor
         {
             try
             {
-                var filesToCompile = new HashSet<string>(csFilePaths);
                 var syntaxTrees = new Dictionary<string, SyntaxTree>();
-                
-                // Key: 类型全名
-                var typeDiffs = new Dictionary<string, DiffResult>();
-                
-                // 收集改动文件的差异
-                foreach (var csFilePath in csFilePaths)
-                {
-                    DiffAnalyzerHelper.AnalyzeDiff(csFilePath, typeDiffs);
-                }
 
-                if (typeDiffs.Count == 0)
-                {
-                    return null;
-                }
-                
-                // 根据diffs判断修改内容中是否有泛型方法
-                foreach (var diff in typeDiffs.Values)
-                {
-                    foreach (var modifiedMethod in diff.ModifiedMethods)
-                    {
-                        if (!modifiedMethod.IsGenericMethod)
-                        {
-                            continue;
-                        }
+                csFilePaths.ForEach(filePath => syntaxTrees.Add(filePath, RoslynHelper.GetSyntaxTree(filePath)));
 
-                        // 收集泛型方法的调用者
-                        foreach (var (typeName, info) in TypeInfoCollector.GetAllTypeInfo())
-                        {
-                            if (!info.UsedGenericMethods.TryGetValue(modifiedMethod.FullName, out var useGenericInfo))
-                            {
-                                continue;
-                            }
-
-                            // 获取或创建该类型的差异结果
-                            if (!typeDiffs.TryGetValue(typeName, out var genericDiff))
-                            {
-                                genericDiff = new DiffResult();
-                                typeDiffs[typeName] = genericDiff;
-                            }
-
-                            // 将调用者方法添加到 ModifiedMethods 中
-                            DiffAnalyzerHelper.AddCallerMethodsToModified(useGenericInfo, genericDiff, info.FilePath);
-                        }
-                    }
-                }
-
-                // 将部分类加入编译
-                foreach (var (typeName, _) in typeDiffs)
-                {
-                    var info = TypeInfoCollector.GetTypeInfo(typeName);
-                    filesToCompile.Add(info.FilePath);
-                    foreach (var infoPartialFile in info.PartialFiles)
-                    {
-                        filesToCompile.Add(infoPartialFile);
-                    }
-                }
-                
-                // 将新增过方法、字段的类也默认加入编译
-                foreach (var (_, hookTypeInfo) in HookTypeInfoCache)
-                {
-                    if (!(hookTypeInfo.AddedMethods.Count > 0 || hookTypeInfo.AddedFields.Count > 0))
-                    {
-                        continue;
-                    }
-
-                    foreach (var filePath in hookTypeInfo.SourceFilePaths)
-                    {
-                        filesToCompile.Add(filePath);
-                    }
-                }
-
-                foreach (var filePath in filesToCompile)
-                {
-                    syntaxTrees.Add(filePath, GetSyntaxTree(filePath));
-                }
-                
                 // 创建编译（合并所有文件到一个程序集）
                 var compilation = CSharpCompilation.Create(
                     assemblyName: Guid.NewGuid().ToString("N"),
@@ -114,27 +41,29 @@ namespace FastScriptReload.Editor
                     )
                 );
 
-                // 检查编译文件中是否有调用internal成员
-                foreach (var csFilePath in filesToCompile)
-                {
-                    if (!syntaxTrees.TryGetValue(csFilePath, out var syntaxTree))
-                    {
-                        continue;
-                    }
+                // Key: 类型全名
+                var typeDiffs = new Dictionary<string, DiffResult>();
 
-                    var typeDependency = new TypeDependencyWalker(compilation.GetSemanticModel(syntaxTree));
-                    typeDependency.Visit(syntaxTree.GetRoot());
-                    foreach (var typeName in typeDependency.GetFullTypeNames())
-                    {
-                        var info = TypeInfoCollector.GetTypeInfo(typeName);
-                        if (info is { IsInternal: true })
-                        {
-                            compilation = compilation.AddSyntaxTrees(GetSyntaxTree(info.FilePath));
-                        }
-                    }
+                // 收集改动文件的差异
+                foreach (var (_, syntaxTree) in syntaxTrees)
+                {
+                    DiffAnalyzerHelper.AnalyzeDiff(compilation, syntaxTree, typeDiffs);
                 }
 
-                // 执行编译到内存流
+                if (typeDiffs.Count == 0)
+                {
+                    return null;
+                }
+
+                // 更新缓存的类型信息
+                TypeInfoHelper.UpdateTypeInfoForFiles(csFilePaths);
+
+                // 收集需要编译的文件
+                CollectFilesToCompile(csFilePaths, syntaxTrees, typeDiffs);
+
+                compilation = compilation.RemoveAllSyntaxTrees();
+                compilation = compilation.AddSyntaxTrees(syntaxTrees.Values);
+
                 var ms = new MemoryStream();
                 var emitResult = compilation.Emit(ms);
 
@@ -146,17 +75,168 @@ namespace FastScriptReload.Editor
                     return typeDiffs;
                 }
 
-                var errors = emitResult.Diagnostics
+                var errorMsg = string.Join("\n", emitResult.Diagnostics
                     .Where(d => d.Severity == DiagnosticSeverity.Error)
-                    .ToList();
+                    .Select(d => d.ToString()));
 
-                LoggerScoped.LogError("编译失败:" + string.Join("\n", errors.Select(d => d.ToString())));
+                LoggerScoped.LogError($"编译失败:{errorMsg}");
                 return null;
             }
             catch (Exception ex)
             {
-                LoggerScoped.LogError($"编译文件时发生异常: {ex}");
+                LoggerScoped.LogError($"编译文件时发生异常  : {ex}");
                 return null;
+            }
+        }
+
+        // 收集需要重新编译的文件
+        private static void CollectFilesToCompile(List<string> csFilePaths, Dictionary<string, SyntaxTree> syntaxTrees, Dictionary<string, DiffResult> typeDiffs)
+        {
+            var processedFiles = new HashSet<string>();
+            // 待处理文件队列
+            var filesToProcess = new Queue<string>();
+
+            // 从 csFilePaths 收集初始文件
+            foreach (var filePath in csFilePaths)
+            {
+                filesToProcess.Enqueue(filePath);
+            }
+
+            // 添加过方法、属性的类型加入编译列表
+            foreach (var (_, hookTypeInfo) in HookTypeInfoCache)
+            {
+                if (hookTypeInfo.ModifiedMethods.Any(pair => pair.Value.HookMethodState == HookMethodState.Added) || hookTypeInfo.AddedFields.Count > 0)
+                {
+                    var typeInfo = TypeInfoHelper.TypeInfoCache.GetValueOrDefault(hookTypeInfo.TypeFullName);
+                    if (typeInfo == null)
+                    {
+                        continue;
+                    }
+
+                    foreach (var filePath in typeInfo.FilePaths)
+                    {
+                        filesToProcess.Enqueue(filePath);
+                    }
+                }
+            }
+
+            // 收集泛型方法的调用者
+            CollectionGenericMethodCaller(typeDiffs, filesToProcess);
+
+            // 递归处理队列中的文件
+            while (filesToProcess.Count > 0)
+            {
+                var filePath = filesToProcess.Dequeue();
+
+                // 防止重复处理
+                if (!processedFiles.Add(filePath))
+                {
+                    continue;
+                }
+
+                // 已修改的文件，使用 syntaxTrees 中的语法树
+                if (!syntaxTrees.TryGetValue(filePath, out var syntaxTree))
+                {
+                    // 未修改的文件，从 FileSnapshot 缓存中获取
+                    var fileSnapshot = TypeInfoHelper.GetFileSnapshot(filePath);
+                    syntaxTree = fileSnapshot.SyntaxTree;
+                }
+
+                syntaxTrees.TryAdd(filePath, syntaxTree);
+
+                // 创建临时编译以获取语义模型
+                // 只需要当前文件的语法树和程序集引用即可，TypeDependencyWalker 主要用于获取类型名称
+                var tempCompilation = CSharpCompilation.Create(
+                    "Temp",
+                    new[] { syntaxTree },
+                    GetOrResolveAssemblyReferences(),
+                    new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+                );
+
+                var semanticModel = tempCompilation.GetSemanticModel(syntaxTree);
+                var root = syntaxTree.GetRoot();
+
+                // 获取文件中定义的所有类型
+                var typeDecls = root.DescendantNodes().OfType<TypeDeclarationSyntax>().ToList();
+
+                // 对于每个类型，收集部分类文件和 Internal 依赖
+                foreach (var typeDecl in typeDecls)
+                {
+                    var fullTypeName = typeDecl.FullName();
+                    var typeInfo = TypeInfoHelper.TypeInfoCache.GetValueOrDefault(fullTypeName);
+                    
+                    // 收集部分类文件
+                    if (typeInfo != null)
+                    {
+                        foreach (var partialFile in typeInfo.FilePaths)
+                        {
+                            if (File.Exists(partialFile) && !processedFiles.Contains(partialFile))
+                            {
+                                filesToProcess.Enqueue(partialFile);
+                            }
+                        }
+                    }
+
+                    // 处理 Internal 依赖
+                    var typeDependency = new TypeDependencyWalker(semanticModel);
+                    typeDependency.Visit(typeDecl);
+
+                    foreach (var dependentTypeName in typeDependency.GetFullTypeNames())
+                    {
+                        var dependentTypeInfo = TypeInfoHelper.TypeInfoCache.GetValueOrDefault(dependentTypeName);
+                        if (dependentTypeInfo == null)
+                        {
+                            continue;
+                        }
+
+                        // 检查是否为 Internal 类型或包含 Internal 成员
+                        if (!dependentTypeInfo.IsInternal)
+                        {
+                            continue;
+                        }
+
+                        // 添加该类型的所有部分类文件（FilePaths）
+                        foreach (var dependentFile in dependentTypeInfo.FilePaths)
+                        {
+                            if (File.Exists(dependentFile) && !processedFiles.Contains(dependentFile))
+                            {
+                                filesToProcess.Enqueue(dependentFile);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 收集泛型方法的调用者
+        /// </summary>
+        /// <param name="typeDiffs"></param>
+        /// <param name="filesToProcess"></param>
+        private static void CollectionGenericMethodCaller(Dictionary<string, DiffResult> typeDiffs, Queue<string> filesToProcess)
+        {
+            foreach (var (_, diff) in typeDiffs)
+            {
+                foreach (var modifiedMethod in diff.ModifiedMethods)
+                {
+                    if (!modifiedMethod.IsGenericMethod)
+                    {
+                        continue;
+                    }
+
+                    foreach (var (_, typeInfo) in TypeInfoHelper.TypeInfoCache)
+                    {
+                        if (!typeInfo.UsedGenericMethods.TryGetValue(modifiedMethod.FullName, out var useGenericInfo))
+                        {
+                            continue;
+                        }
+
+                        foreach (var filePath in typeInfo.FilePaths)
+                        {
+                            filesToProcess.Enqueue(filePath);
+                        }
+                    }
+                }
             }
         }
     }

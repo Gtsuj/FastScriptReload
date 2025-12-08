@@ -4,14 +4,11 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using FastScriptReload.Runtime;
-using HarmonyLib;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
-using Mono.Collections.Generic;
 using Code = Mono.Cecil.Cil.Code;
 using MethodAttributes = Mono.Cecil.MethodAttributes;
-using MethodBody = Mono.Cecil.Cil.MethodBody;
 using MethodImplAttributes = Mono.Cecil.MethodImplAttributes;
 using ParameterAttributes = Mono.Cecil.ParameterAttributes;
 
@@ -24,59 +21,18 @@ namespace FastScriptReload.Editor
     {
         #region 核心方法
 
-        /// <summary>
-        /// 修改编译后的程序集
-        /// </summary>
-        /// <param name="hookTypeInfos">程序集差异结果</param>
-        /// <returns>修改后的程序集文件路径</returns>
-        public static string ModifyCompileAssembly(List<HookTypeInfo> hookTypeInfos)
+        public static string ModifyCompileAssembly(Dictionary<string, DiffResult> results)
         {
-            var templateAssembly = _assemblyDefinition;
-            var mainModule = templateAssembly.MainModule;
+            HandleAssemblyType(results);
 
-            foreach (var typeDef in mainModule.Types)
-            {
-                if (!HookTypeInfoCache.TryGetValue(typeDef.FullName, out var info) || !info.IsDirty)
-                {
-                    continue;
-                }
-
-                void HandleModifyMethod(string hookMethodName, HookMethodInfo hookMethodInfo)
-                {
-                    var methodDef = typeDef.Methods.FirstOrDefault((definition => definition.FullName == hookMethodName));
-                    if (methodDef == null)
-                    {
-                        return;
-                    }
-
-                    var newMethodDef = ModifyMethod(mainModule, methodDef, mainModule.ImportReference(info.ExistingType));
-                    hookMethodInfo.ModifyMethodName = newMethodDef.FullName;
-                    hookMethodInfo.MethodDefinition = newMethodDef;
-                    
-                    typeDef.Methods.Add(newMethodDef);
-                }
-
-                // 处理添加的方法
-                foreach (var (name, addedMethodInfo) in info.AddedMethods)
-                {
-                    HandleModifyMethod(name, addedMethodInfo);
-                }
-                
-                // 处理修改的方法
-                foreach (var (name, modifiedMethodInfo) in info.ModifiedMethods)
-                {
-                    HandleModifyMethod(name, modifiedMethodInfo);
-                }
-            }
-
-            ClearAssembly(mainModule);
+            // 清理程序集
+            ClearAssembly(results);
 
             // 添加必要的引用
-            AddRequiredReferences(templateAssembly, hookTypeInfos);
+            AddRequiredReferences(_assemblyDefinition, HookTypeInfoCache.Values.ToList());
 
             // 生成文件名并保存
-            var filePath = Path.Combine(AssemblyPath,
-                $"{_assemblyDefinition.Name.Name}.dll");
+            var filePath = Path.Combine(AssemblyPath, $"{_assemblyDefinition.Name.Name}.dll");
 
             // 确保目录存在
             var directory = Path.GetDirectoryName(filePath);
@@ -85,10 +41,10 @@ namespace FastScriptReload.Editor
                 Directory.CreateDirectory(directory);
             }
 
-            templateAssembly.Write(filePath);
+            _assemblyDefinition.Write(filePath);
 
             // 设置每个类型的程序集路径
-            foreach (var typeDiff in hookTypeInfos)
+            foreach (var (_, typeDiff) in HookTypeInfoCache)
             {
                 typeDiff.WrapperAssemblyPath = filePath;
             }
@@ -96,73 +52,139 @@ namespace FastScriptReload.Editor
             return filePath;
         }
 
-        /// <summary>
-        /// 清理程序集：删除未使用的类型、方法和字段
-        /// </summary>
-        private static void ClearAssembly(ModuleDefinition mainModule)
+        private static void HandleAssemblyType(Dictionary<string, DiffResult> results)
         {
-            // 清理编译器生成的特性
-            var compilerNamespaces = new[] { "System.Runtime.CompilerServices", "Microsoft.CodeAnalysis" };
-            CleanupAttributesByNamespace(mainModule.CustomAttributes, compilerNamespaces);
-            CleanupAttributesByNamespace(mainModule.Assembly.CustomAttributes, compilerNamespaces);            
-
-            // 统一清理程序集
-            foreach (var typeDef in mainModule.Types.ToArray())
+            var mainModule = _assemblyDefinition.MainModule;
+            foreach (var typeDef in mainModule.Types)
             {
-                // 删除没有Hook的类型
-                if (!HookTypeInfoCache.TryGetValue(typeDef.FullName, out var info) || !info.IsDirty)
+                if (!results.TryGetValue(typeDef.FullName, out DiffResult result))
                 {
-                    mainModule.Types.Remove(typeDef);
                     continue;
                 }
 
-                // 删除没有被Hook的方法
-                var hookedMethodNames = new HashSet<string>(
-                    info.ModifiedMethods.Values.Select(m => m.ModifyMethodName)
-                        .Concat(info.AddedMethods.Values.Select(m => m.ModifyMethodName)));
-
-                foreach (var methodDef in typeDef.Methods.ToArray())
+                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeDef.FullName, out var originalType))
                 {
-                    if (!hookedMethodNames.Contains(methodDef.FullName))
-                    {
-                        typeDef.Methods.Remove(methodDef);
-                    }
-                }
-
-                // 删除没有被Hook的字段
-                foreach (var fieldDef in typeDef.Fields.ToArray())
-                {
-                    if (!info.AddedFields.TryGetValue(fieldDef.FullName, out var addedFieldInfo) || !addedFieldInfo.IsDirty)
-                    {
-                        typeDef.Fields.Remove(fieldDef);
-                        continue;
-                    }
-
-                    addedFieldInfo.IsDirty = false;
+                    continue;
                 }
                 
+                if (!HookTypeInfoCache.TryGetValue(originalType.FullName!, out var hookTypeInfo))
+                {
+                    hookTypeInfo = new HookTypeInfo
+                    {
+                        TypeFullName = originalType.FullName,
+                        ExistingType = originalType,
+                    };
+
+                    HookTypeInfoCache.Add(originalType.FullName, hookTypeInfo);
+                }
+
+                // 处理新增字段
+                foreach (var fieldDefinition in typeDef.Fields)
+                {
+                    if (result.AddedFields.ContainsKey(fieldDefinition.FullName))
+                    {
+                        hookTypeInfo.AddedFields.TryAdd(fieldDefinition.FullName, fieldDefinition);
+                    }
+                }
+                
+                HashSet<MethodDefinition> hookMethods = new();
+                
+                var originalMethods = originalType.GetAllMethods();
+
+                void HandleModifyMethod(List<MethodDiffInfo> methodDiffInfos, HookMethodState hookMethodState)
+                {
+                    foreach (var methodDiffInfo in methodDiffInfos)
+                    {
+                        var hookMethodName = methodDiffInfo.FullName;
+
+                        var methodDef = typeDef.Methods.FirstOrDefault((definition => definition.FullName == hookMethodName));
+                        if (methodDef == null)
+                        {
+                            continue;
+                        }
+                        
+                        var newMethodDef = ModifyMethod(mainModule, methodDef, mainModule.ImportReference(originalType));
+                        if (!hookTypeInfo.ModifiedMethods.TryGetValue(hookMethodName, out var hookMethodInfo))
+                        {
+                            hookMethodInfo = new HookMethodInfo(newMethodDef, hookMethodState, 
+                                originalMethods.FirstOrDefault(info => info.FullName().Equals(hookMethodName)));
+                            hookTypeInfo.ModifiedMethods.Add(hookMethodName, hookMethodInfo);
+                        }
+                        else
+                        {
+                            hookMethodInfo.MethodDefinition = newMethodDef;
+                        }
+                        
+                        typeDef.Methods.Add(newMethodDef);
+                        hookMethods.Add(newMethodDef);
+                    }
+                }
+                
+                // 处理添加的方法
+                HandleModifyMethod(result.AddedMethods, HookMethodState.Added);
+
+                // 处理修改的方法
+                HandleModifyMethod(result.ModifiedMethods, HookMethodState.Modified);
+                
+                // 清理方法并提交修改过后的方法
+                typeDef.Methods.Clear();
+                foreach (var method in hookMethods)
+                {
+                    typeDef.Methods.Add(method);
+                }
+
+                // 清理字段
+                foreach (var fieldDef in typeDef.Fields.ToArray())
+                {
+                    if (!result.AddedFields.ContainsKey(fieldDef.FullName))
+                    {
+                        typeDef.Fields.Remove(fieldDef);
+                    }
+                }
+
                 typeDef.Properties.Clear();
             }
         }
 
         /// <summary>
-        /// 按命名空间清理特性
+        /// 清理程序集：删除未使用的类型
         /// </summary>
-        private static void CleanupAttributesByNamespace(ICollection<CustomAttribute> attributes, string[] compilerNamespaces)
+        private static void ClearAssembly(Dictionary<string, DiffResult> results)
         {
-            foreach (var attr in attributes.ToArray())
+            var mainModule = _assemblyDefinition.MainModule;
+
+            // 清理编译器生成的特性
+            var compilerNamespaces = new[] { "System.Runtime.CompilerServices", "Microsoft.CodeAnalysis" };
+            
+            void CleanupAttributesByNamespace(ICollection<CustomAttribute> attributes)
             {
-                var attrNamespace = attr.AttributeType.Namespace ?? string.Empty;
-                if (compilerNamespaces.Any(ns => attrNamespace.Equals(ns) || attrNamespace.StartsWith($"{ns}.")))
+                foreach (var attr in attributes.ToArray())
                 {
-                    attributes.Remove(attr);
+                    var attrNamespace = attr.AttributeType.Namespace ?? string.Empty;
+                    if (compilerNamespaces.Any(ns => attrNamespace.Equals(ns) || attrNamespace.StartsWith($"{ns}.")))
+                    {
+                        attributes.Remove(attr);
+                    }
+                }
+            }
+            
+            CleanupAttributesByNamespace(mainModule.CustomAttributes);
+            CleanupAttributesByNamespace(mainModule.Assembly.CustomAttributes);
+
+            // 统一清理程序集
+            foreach (var typeDef in mainModule.Types.ToArray())
+            {
+                // 删除没有Hook的类型
+                if (!results.TryGetValue(typeDef.FullName, out var result))
+                {
+                    mainModule.Types.Remove(typeDef);
                 }
             }
         }
 
         #endregion
 
-        #region 方法修改
+        #region 方法、字段修改
 
         private static MethodDefinition ModifyMethod(ModuleDefinition module, MethodDefinition methodDef, TypeReference originalTypeRef)
         {
@@ -241,8 +263,7 @@ namespace FastScriptReload.Editor
         /// 创建指令
         /// </summary>
         private static void CreateInstruction(ILProcessor processor, ModuleDefinition module, Instruction sourceInst,
-            Dictionary<ParameterDefinition, ParameterDefinition> parameterMap,
-            Dictionary<GenericParameter, GenericParameter> genericParamMap)
+            Dictionary<ParameterDefinition, ParameterDefinition> parameterMap, Dictionary<GenericParameter, GenericParameter> genericParamMap)
         {
             if (sourceInst.Operand == null)
             {
@@ -293,6 +314,30 @@ namespace FastScriptReload.Editor
                     break;
             }
         }
+        
+        /// <summary>
+        /// 处理方法引用指令
+        /// </summary>
+        private static void HandleMethodReference(ILProcessor processor, ModuleDefinition module, Instruction sourceInst, MethodReference methodRef)
+        {
+            // 处理新增方法调用
+            if (HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookType)
+                && hookType.TryGetAddedMethod(methodRef.FullName, out var addedMethodInfo))
+            {
+                methodRef = module.ImportReference(addedMethodInfo.MethodDefinition);
+                processor.Append(Instruction.Create(sourceInst.OpCode, methodRef));
+                return;
+            }
+
+            var originalMethodRef = GetOriginalMethodReference(module, methodRef);
+            if (originalMethodRef == null)
+            {
+                LoggerScoped.LogWarning($"从原程序集获取方法引用失败: {methodRef.FullName}");
+                originalMethodRef = methodRef;
+            }
+
+            processor.Append(Instruction.Create(sourceInst.OpCode, originalMethodRef));
+        }
 
         /// <summary>
         /// 处理字段引用指令
@@ -333,193 +378,6 @@ namespace FastScriptReload.Editor
 
             processor.Append(Instruction.Create(sourceInst.OpCode, newFieldRef));
         }
-
-        /// <summary>
-        /// 处理方法引用指令
-        /// </summary>
-        private static void HandleMethodReference(ILProcessor processor, ModuleDefinition module, Instruction sourceInst, MethodReference methodRef)
-        {
-            // 处理新增方法调用
-            if (HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookType)
-                && hookType.AddedMethods.TryGetValue(methodRef.FullName, out var addedMethodInfo))
-            {
-                methodRef = module.ImportReference(addedMethodInfo.MethodDefinition);
-                processor.Append(Instruction.Create(sourceInst.OpCode, methodRef));
-                return;
-            }
-
-            var originalMethodRef = GetOriginalMethodReference(module, methodRef);
-            if (originalMethodRef == null)
-            {
-                LoggerScoped.LogWarning($"从原程序集获取方法引用失败: {methodRef.FullName}");
-                originalMethodRef = methodRef;
-            }
-
-            processor.Append(Instruction.Create(sourceInst.OpCode, originalMethodRef));
-        }
-
-        #endregion
-
-        #region 程序集引用管理
-
-        /// <summary>
-        /// 添加必要的程序集引用
-        /// </summary>
-        private static void AddRequiredReferences(AssemblyDefinition wrapperAssembly, List<HookTypeInfo> hookTypeInfos)
-        {
-            var mainModule = wrapperAssembly.MainModule;
-
-            // 收集所有原始程序集
-            var originalAssemblies = new HashSet<Assembly>();
-            foreach (var typeInfo in hookTypeInfos)
-            {
-                if (typeInfo.ExistingType?.Assembly != null)
-                {
-                    originalAssemblies.Add(typeInfo.ExistingType.Assembly);
-                }
-            }
-
-            // 为每个原始程序集添加引用及其依赖
-            foreach (var originalAssembly in originalAssemblies)
-            {
-                try
-                {
-                    if (string.IsNullOrEmpty(originalAssembly.Location))
-                    {
-                        LoggerScoped.LogDebug($"跳过动态程序集引用: {originalAssembly.FullName}");
-                        continue;
-                    }
-
-                    var originalAssemblyDef = GetOrReadAssemblyDefinition(originalAssembly.Location);
-                    if (originalAssemblyDef == null)
-                    {
-                        LoggerScoped.LogWarning($"无法读取原始程序集: {originalAssembly.Location}");
-                        continue;
-                    }
-
-                    // 添加对源程序集的引用
-                    var sourceAssemblyRef = new AssemblyNameReference(
-                        originalAssemblyDef.Name.Name,
-                        originalAssemblyDef.Name.Version);
-
-                    if (mainModule.AssemblyReferences.All(r => r.FullName != sourceAssemblyRef.FullName))
-                    {
-                        mainModule.AssemblyReferences.Add(sourceAssemblyRef);
-                        LoggerScoped.LogDebug($"添加原始程序集引用: {sourceAssemblyRef.FullName}");
-                    }
-
-                    // 添加源程序集的所有依赖引用（排除template程序集）
-                    foreach (var reference in originalAssemblyDef.MainModule.AssemblyReferences)
-                    {
-                        if (mainModule.AssemblyReferences.All(r => r.FullName != reference.FullName))
-                        {
-                            mainModule.AssemblyReferences.Add(reference);
-                            LoggerScoped.LogDebug($"添加依赖引用: {reference.FullName}");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LoggerScoped.LogWarning($"无法添加原始程序集引用: {originalAssembly.FullName}, 错误: {ex.Message}");
-                }
-            }
-        }
-
-        #endregion
-
-        #region 类型和方法引用处理
-
-        /// <summary>
-        /// 获取原类型引用
-        /// </summary>
-        private static TypeReference GetOriginalType(ModuleDefinition module, TypeReference operandTypeRef,
-            Dictionary<GenericParameter, GenericParameter> genericParamMap = null)
-        {
-            if (operandTypeRef == null)
-            {
-                return null;
-            }
-
-            if (operandTypeRef is GenericParameter operandGenericParameter &&
-                genericParamMap != null &&
-                genericParamMap.TryGetValue(operandGenericParameter, out var genericParameter))
-            {
-                return genericParameter;
-            }
-
-            if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(operandTypeRef.FullName,
-                    out var originalType))
-            {
-                return module.ImportReference(originalType);
-            }
-
-            return operandTypeRef;
-        }
-
-        /// <summary>
-        /// 从原程序集中获取方法引用
-        /// </summary>
-        private static MethodReference GetOriginalMethodReference(ModuleDefinition module, MethodReference methodRef)
-        {
-            try
-            {
-                var declaringTypeFullName = methodRef.DeclaringType.FullName;
-
-                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(declaringTypeFullName,
-                        out var originalType) ||
-                    string.IsNullOrEmpty(originalType.Assembly?.Location))
-                {
-                    return null;
-                }
-
-                // 作用域与原类型一致
-                if (originalType.Assembly.GetName().Name.Equals(methodRef?.DeclaringType?.Scope?.Name))
-                {
-                    return module.ImportReference(methodRef);
-                }
-
-                var originalAssemblyDef = GetOrReadAssemblyDefinition(originalType.Assembly.Location);
-                var originalTypeDef = originalAssemblyDef?.MainModule.Types.FirstOrDefault(t => t.FullName == declaringTypeFullName);
-                if (originalTypeDef == null)
-                {
-                    return null;
-                }
-
-                var templateMethodRefFullName = methodRef.IsGenericInstance
-                    ? methodRef.GetElementMethod().FullName
-                    : methodRef.FullName;
-
-                var methods = originalTypeDef.Methods.Where(m => m.FullName == templateMethodRefFullName).ToArray();
-                switch (methods.Length)
-                {
-                    case 0:
-                        return null;
-                    case > 1:
-                        throw new Exception($"方法重载过多: {methodRef.FullName}");
-                }
-
-                if (!methodRef.IsGenericInstance)
-                {
-                    return module.ImportReference(methods[0]);
-                }
-
-                // 创建泛型实例
-                var originalMethodRef = module.ImportReference(methods[0]);
-
-                var genericInstanceMethod = MonoCecilHelper.CreateGenericInstanceMethodFromSource(originalMethodRef, methodRef, typeRef => GetOriginalType(module, typeRef));
-
-                return genericInstanceMethod ?? module.ImportReference(methodRef);
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogError($"从原程序集获取方法引用失败: {methodRef.FullName}, 错误: {ex.Message}");
-                return null;
-            }
-        }
-
-        #endregion
-
-        #region 字段 IL Hook 支持
 
         /// <summary>
         /// 获取 FieldResolver&lt;TOwner&gt;.GetHolder&lt;TField&gt; 方法引用
@@ -827,7 +685,167 @@ namespace FastScriptReload.Editor
                 return null;
             }
         }
+        
+        #endregion
+
+        #region 程序集引用管理
+
+        /// <summary>
+        /// 添加必要的程序集引用
+        /// </summary>
+        private static void AddRequiredReferences(AssemblyDefinition wrapperAssembly, List<HookTypeInfo> hookTypeInfos)
+        {
+            var mainModule = wrapperAssembly.MainModule;
+
+            // 收集所有原始程序集
+            var originalAssemblies = new HashSet<Assembly>();
+            foreach (var typeInfo in hookTypeInfos)
+            {
+                if (typeInfo.ExistingType?.Assembly != null)
+                {
+                    originalAssemblies.Add(typeInfo.ExistingType.Assembly);
+                }
+            }
+
+            // 为每个原始程序集添加引用及其依赖
+            foreach (var originalAssembly in originalAssemblies)
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(originalAssembly.Location))
+                    {
+                        LoggerScoped.LogDebug($"跳过动态程序集引用: {originalAssembly.FullName}");
+                        continue;
+                    }
+
+                    var originalAssemblyDef = GetOrReadAssemblyDefinition(originalAssembly.Location);
+                    if (originalAssemblyDef == null)
+                    {
+                        LoggerScoped.LogWarning($"无法读取原始程序集: {originalAssembly.Location}");
+                        continue;
+                    }
+
+                    // 添加对源程序集的引用
+                    var sourceAssemblyRef = new AssemblyNameReference(
+                        originalAssemblyDef.Name.Name,
+                        originalAssemblyDef.Name.Version);
+
+                    if (mainModule.AssemblyReferences.All(r => r.FullName != sourceAssemblyRef.FullName))
+                    {
+                        mainModule.AssemblyReferences.Add(sourceAssemblyRef);
+                        LoggerScoped.LogDebug($"添加原始程序集引用: {sourceAssemblyRef.FullName}");
+                    }
+
+                    // 添加源程序集的所有依赖引用（排除template程序集）
+                    foreach (var reference in originalAssemblyDef.MainModule.AssemblyReferences)
+                    {
+                        if (mainModule.AssemblyReferences.All(r => r.FullName != reference.FullName))
+                        {
+                            mainModule.AssemblyReferences.Add(reference);
+                            LoggerScoped.LogDebug($"添加依赖引用: {reference.FullName}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LoggerScoped.LogWarning($"无法添加原始程序集引用: {originalAssembly.FullName}, 错误: {ex.Message}");
+                }
+            }
+        }
 
         #endregion
+
+        #region 类型和方法引用处理
+
+        /// <summary>
+        /// 获取原类型引用
+        /// </summary>
+        private static TypeReference GetOriginalType(ModuleDefinition module, TypeReference operandTypeRef,
+            Dictionary<GenericParameter, GenericParameter> genericParamMap = null)
+        {
+            if (operandTypeRef == null)
+            {
+                return null;
+            }
+
+            if (operandTypeRef is GenericParameter operandGenericParameter &&
+                genericParamMap != null &&
+                genericParamMap.TryGetValue(operandGenericParameter, out var genericParameter))
+            {
+                return genericParameter;
+            }
+
+            if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(operandTypeRef.FullName,
+                    out var originalType))
+            {
+                return module.ImportReference(originalType);
+            }
+
+            return operandTypeRef;
+        }
+
+        /// <summary>
+        /// 从原程序集中获取方法引用
+        /// </summary>
+        private static MethodReference GetOriginalMethodReference(ModuleDefinition module, MethodReference methodRef)
+        {
+            try
+            {
+                var declaringTypeFullName = methodRef.DeclaringType.FullName;
+
+                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(declaringTypeFullName,
+                        out var originalType) ||
+                    string.IsNullOrEmpty(originalType.Assembly?.Location))
+                {
+                    return null;
+                }
+
+                // 作用域与原类型一致
+                if (originalType.Assembly.GetName().Name.Equals(methodRef?.DeclaringType?.Scope?.Name))
+                {
+                    return module.ImportReference(methodRef);
+                }
+
+                var originalAssemblyDef = GetOrReadAssemblyDefinition(originalType.Assembly.Location);
+                var originalTypeDef = originalAssemblyDef?.MainModule.Types.FirstOrDefault(t => t.FullName == declaringTypeFullName);
+                if (originalTypeDef == null)
+                {
+                    return null;
+                }
+
+                var templateMethodRefFullName = methodRef.IsGenericInstance
+                    ? methodRef.GetElementMethod().FullName
+                    : methodRef.FullName;
+
+                var methods = originalTypeDef.Methods.Where(m => m.FullName == templateMethodRefFullName).ToArray();
+                switch (methods.Length)
+                {
+                    case 0:
+                        return null;
+                    case > 1:
+                        throw new Exception($"方法重载过多: {methodRef.FullName}");
+                }
+
+                if (!methodRef.IsGenericInstance)
+                {
+                    return module.ImportReference(methods[0]);
+                }
+
+                // 创建泛型实例
+                var originalMethodRef = module.ImportReference(methods[0]);
+
+                var genericInstanceMethod = MonoCecilHelper.CreateGenericInstanceMethodFromSource(originalMethodRef, methodRef, typeRef => GetOriginalType(module, typeRef));
+
+                return genericInstanceMethod ?? module.ImportReference(methodRef);
+            }
+            catch (Exception ex)
+            {
+                LoggerScoped.LogError($"从原程序集获取方法引用失败: {methodRef.FullName}, 错误: {ex.Message}");
+                return null;
+            }
+        }
+
+        #endregion
+        
     }
 }

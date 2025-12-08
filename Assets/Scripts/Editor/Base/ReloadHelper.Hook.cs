@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using FastScriptReload.Runtime;
@@ -17,113 +18,94 @@ namespace FastScriptReload.Editor
         /// 应用热重载Hook，将Wrapper程序集中的静态方法Hook到原有方法上
         /// Hook成功后保存到全局容器中
         /// </summary>
-        /// <param name="hookTypeInfos">程序集差异结果</param>
-        public static void ApplyHooks(List<HookTypeInfo> hookTypeInfos)
+        /// <param name="diffResults">差异结果</param>
+        public static void ApplyHooks(Dictionary<string, DiffResult> diffResults)
         {
-            // 直接遍历所有类型差异，应用Hook
-            foreach (var typeInfo in hookTypeInfos)
+            foreach (var (typeFullName, result) in diffResults)
             {
-                // 从路径获取程序集名称
-                var assemblyName = System.IO.Path.GetFileNameWithoutExtension(typeInfo.WrapperAssemblyPath);
-                    
-                // 从全局缓存获取或加载程序集
-                if (!AssemblyCache.TryGetValue(assemblyName, out var wrapperAssembly))
+                if (!HookTypeInfoCache.TryGetValue(typeFullName, out var hookTypeInfo))
                 {
-                    wrapperAssembly = Assembly.LoadFrom(typeInfo.WrapperAssemblyPath);
-                    AssemblyCache[assemblyName] = wrapperAssembly;
+                    continue;
                 }
 
-                // 应用Hook
-                ApplyHooksForType(typeInfo, wrapperAssembly);
+                var wrapperAssemblyPath = hookTypeInfo.WrapperAssemblyPath;
+                if (wrapperAssemblyPath == null)
+                {
+                    continue;
+                }
+
+                if (!AssemblyCache.TryGetValue(wrapperAssemblyPath, out var wrapperAssembly))
+                {
+                    wrapperAssembly = Assembly.LoadFrom(wrapperAssemblyPath);
+                    AssemblyCache[wrapperAssemblyPath] = wrapperAssembly;
+                }
+
+                // 从 Wrapper 程序集中找到对应的类型
+                Type wrapperType = wrapperAssembly.GetType(typeFullName);
+                if (wrapperType == null)
+                {
+                    LoggerScoped.LogWarning($"在 Wrapper 程序集中找不到类型: {typeFullName}");
+                    return;
+                }
+
+                // 获取 Wrapper 类型中的所有静态方法（公有和私有）
+                var wrapperMethods = wrapperType.GetAllMethods();
+                foreach (var resultModified in result.ModifiedMethods)
+                {
+                    if (!hookTypeInfo.ModifiedMethods.TryGetValue(resultModified.FullName, out var modifiedMethod))
+                    {
+                        continue;
+                    }
+
+                    var methodName = resultModified.FullName;
+
+                    var wrapperMethod = wrapperMethods.FirstOrDefault(m => m.FullName() == modifiedMethod.WrapperMethodName);
+                    if (wrapperMethod == null)
+                    {
+                        continue;
+                    }
+
+                    MethodHelper.DisableVisibilityChecks(wrapperMethod);
+
+                    if (modifiedMethod.HookMethodState == HookMethodState.Added)
+                    {
+                        AddedMethodHookHandle(methodName, modifiedMethod, wrapperMethod);
+                    }
+                    else
+                    {
+                        Hook(methodName, modifiedMethod.OriginalMethod, wrapperMethod);
+                    }
+                }
             }
         }
 
-        /// <summary>
-        /// 为单个类型应用Hook
-        /// </summary>
-        private static void ApplyHooksForType(HookTypeInfo typeInfo, Assembly wrapperAssembly)
+        private static void AddedMethodHookHandle(string methodName, HookMethodInfo modifiedMethod, MethodBase wrapperMethod)
         {
-            // 从 Wrapper 程序集中找到对应的类型
-            Type wrapperType = wrapperAssembly.GetType(typeInfo.TypeFullName);
-            if (wrapperType == null)
+            foreach (var historicalMethod in modifiedMethod.HistoricalHookedMethods)
             {
-                LoggerScoped.LogWarning($"在 Wrapper 程序集中找不到类型: {typeInfo.TypeFullName}");
-                return;
+                Hook(methodName, historicalMethod, wrapperMethod);
             }
 
-            // 获取 Wrapper 类型中的所有静态方法（公有和私有）
-            var wrapperMethods = wrapperType.GetAllMethods().ToArray();
-
-            MethodBase FindWrapperMethod(string methodName)
+            if (modifiedMethod.HistoricalHookedMethods.Count == 0)
             {
-                var wrapperMethod = wrapperMethods.FirstOrDefault(m => m.FullName() == methodName);
-
-                if (wrapperMethod == null)
-                {
-                    return null;
-                }
-                
-                MethodHelper.DisableVisibilityChecks(wrapperMethod);
-
-                return wrapperMethod;
+                LoggerScoped.Log($"Hook Add Func Success: {methodName}");
             }
 
-            void Hook(string methodFullName, HookMethodInfo hookMethodInfo, MethodBase original, MethodBase replacement)
+            modifiedMethod.HistoricalHookedMethods.Add(wrapperMethod);
+        }
+
+        private static void Hook(string methodFullName, MethodBase original, MethodBase replacement)
+        {
+            // 执行 Hook
+            var errorMessage = Memory.DetourMethod(original, replacement);
+
+            if (string.IsNullOrEmpty(errorMessage))
             {
-                // 执行 Hook
-                var errorMessage = Memory.DetourMethod(original, replacement);
-                
-                if (string.IsNullOrEmpty(errorMessage))
-                {
-                    // Hook 成功
-                    hookMethodInfo.IsDirty = false;
-                    
-                    LoggerScoped.Log($"Hook Success: {methodFullName}");
-                }
-                else
-                {
-                    LoggerScoped.LogError($"Hook Failed: {methodFullName}, Error: {errorMessage}");
-                }
+                LoggerScoped.Log($"Hook Success: {methodFullName}");
             }
-
-            // 遍历修改的方法，进行Hook
-            foreach (var (methodFullName, updateMethodInfo) in typeInfo.ModifiedMethods)
+            else
             {
-                if (!updateMethodInfo.IsDirty)
-                {
-                    continue;
-                }
-
-                var wrapperMethod = FindWrapperMethod(updateMethodInfo.ModifyMethodName);
-                if (wrapperMethod == null)
-                {
-                    LoggerScoped.LogError($"Can't find wrapper method: {updateMethodInfo.ModifyMethodName}");
-                    continue;
-                }
-                
-                Hook(methodFullName, updateMethodInfo, updateMethodInfo.OriginalMethod, wrapperMethod);
-            }
-
-            // 遍历新增的方法，进行Hook
-            foreach (var (methodFullName, addedMethodInfo) in typeInfo.AddedMethods)
-            {
-                if (!addedMethodInfo.IsDirty)
-                {
-                    continue;
-                }
-                
-                var wrapperMethod = FindWrapperMethod(addedMethodInfo.ModifyMethodName);
-                if (wrapperMethod == null)
-                {
-                    continue;
-                }
-                
-                foreach (var historicalMethod in addedMethodInfo.HistoricalHookedMethods)
-                {
-                    Hook(methodFullName, addedMethodInfo, historicalMethod, wrapperMethod);
-                }
-                
-                addedMethodInfo.HistoricalHookedMethods.Add(wrapperMethod);
+                LoggerScoped.LogError($"Hook Failed: {methodFullName}, Error: {errorMessage}");
             }
         }
     }
