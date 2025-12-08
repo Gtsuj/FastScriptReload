@@ -73,7 +73,7 @@ namespace FastScriptReload.Editor
             return builder.ToString();
         }
 
-        public static IEnumerable<MethodBase> GetAllMethods(this Type type)
+        public static MethodBase[] GetAllMethods(this Type type)
         {
             var flags = BindingFlags.Public | BindingFlags.NonPublic |
                 BindingFlags.Static | BindingFlags.Instance |
@@ -81,7 +81,7 @@ namespace FastScriptReload.Editor
             // 找出修改的方法
             var methods = type.GetConstructors(flags)
                 .Cast<MethodBase>()
-                .Concat(type.GetMethods(flags));
+                .Concat(type.GetMethods(flags)).ToArray();
 
             return methods;
         }

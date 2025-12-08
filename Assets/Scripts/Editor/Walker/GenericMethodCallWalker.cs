@@ -50,7 +50,7 @@ namespace FastScriptReload.Editor
         public override void VisitClassDeclaration(ClassDeclarationSyntax node)
         {
             var previousClassName = _currentClassName;
-            _currentClassName = GetTypeFullName(node);
+            _currentClassName = node.FullName();
             base.VisitClassDeclaration(node);
             _currentClassName = previousClassName;
         }
@@ -58,7 +58,7 @@ namespace FastScriptReload.Editor
         public override void VisitStructDeclaration(StructDeclarationSyntax node)
         {
             var previousClassName = _currentClassName;
-            _currentClassName = GetTypeFullName(node);
+            _currentClassName = node.FullName();
             base.VisitStructDeclaration(node);
             _currentClassName = previousClassName;
         }
@@ -66,7 +66,7 @@ namespace FastScriptReload.Editor
         public override void VisitInterfaceDeclaration(InterfaceDeclarationSyntax node)
         {
             var previousClassName = _currentClassName;
-            _currentClassName = GetTypeFullName(node);
+            _currentClassName = node.FullName();
             base.VisitInterfaceDeclaration(node);
             _currentClassName = previousClassName;
         }
@@ -77,7 +77,7 @@ namespace FastScriptReload.Editor
         public override void VisitMethodDeclaration(MethodDeclarationSyntax node)
         {
             var previousMethodName = _currentMethodName;
-            _currentMethodName = GetMethodFullName(node);
+            _currentMethodName = node.FullName();
             
             base.VisitMethodDeclaration(node);
             
@@ -327,40 +327,6 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 获取类型全名（支持嵌套类型）
         /// </summary>
-        private static string GetTypeFullName(TypeDeclarationSyntax typeDecl)
-        {
-            var parts = new List<string>();
-            var current = typeDecl;
-            
-            // 收集所有嵌套类型名
-            while (current != null)
-            {
-                parts.Insert(0, current.Identifier.ValueText);
-                current = current.Parent as TypeDeclarationSyntax;
-            }
-            
-            // 获取命名空间
-            var namespaceDecl = typeDecl.Parent;
-            while (namespaceDecl != null && !(namespaceDecl is BaseNamespaceDeclarationSyntax))
-            {
-                namespaceDecl = namespaceDecl.Parent;
-            }
-            
-            var namespaceName = (namespaceDecl as BaseNamespaceDeclarationSyntax)?.Name.ToString() ?? string.Empty;
-            var typeName = string.Join(".", parts);
-            
-            return string.IsNullOrEmpty(namespaceName) ? typeName : $"{namespaceName}.{typeName}";
-        }
-
-        /// <summary>
-        /// 获取方法全名（包含参数类型）
-        /// </summary>
-        private static string GetMethodFullName(MethodDeclarationSyntax method)
-        {
-            var methodName = method.Identifier.ValueText;
-            var parameters = string.Join(",", method.ParameterList.Parameters.Select(p => p.Type?.ToString() ?? ""));
-            return $"{methodName}({parameters})";
-        }
     }
 }
 

@@ -571,8 +571,8 @@ namespace FastScriptReload.Editor
                             .Select(e => e.First().FullFileName).ToList();
 
                         // 编译改动的C#文件
-                        var result = ReloadHelper.CompileCsFiles(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
-                        if (result == null)
+                        var diffResults = ReloadHelper.CompileCsFiles(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
+                        if (diffResults == null)
                         {
                             changesAwaitingHotReload.ForEach(c =>
                             {
@@ -581,13 +581,8 @@ namespace FastScriptReload.Editor
                             return;
                         }
 
-                        // 比较原类型和修改后的类型（使用全局缓存的解析选项）
-                        ReloadHelper.DiffAssembly(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
-
-                        List<HookTypeInfo> hookTypeInfos = ReloadHelper.HookTypeInfoCache.Values.Where(info => info.IsDirty).ToList();
-
                         // 删除冗余部分，将改动的方法转换为静态方法
-                        var assemblyPath = ReloadHelper.ModifyCompileAssembly(hookTypeInfos);
+                        var assemblyPath = ReloadHelper.ModifyCompileAssembly(diffResults);
                         
                         changesAwaitingHotReload.ForEach(c =>
                         {
@@ -596,7 +591,7 @@ namespace FastScriptReload.Editor
                         });
                         
                         // 应用热重载Hook
-                        ReloadHelper.ApplyHooks(hookTypeInfos);
+                        ReloadHelper.ApplyHooks(diffResults);
 
                         changesAwaitingHotReload.ForEach(c =>
                         {
