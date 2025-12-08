@@ -33,11 +33,6 @@ namespace FastScriptReload.Editor
         /// 全局缓存已加载的 Wrapper 程序集（按程序集名称索引）
         /// </summary>
         public static Dictionary<string, Assembly> AssemblyCache = new();
-
-        /// <summary>
-        /// 全局缓存的解析选项（在编译过程中不会变化）
-        /// </summary>
-        private static CSharpParseOptions _parseOptions;
         
         private static AssemblyDefinition _assemblyDefinition;
 
@@ -62,13 +57,8 @@ namespace FastScriptReload.Editor
                 return;
             }
 
-            var scriptPaths = Directory.GetFiles(Application.dataPath, "*.cs", SearchOption.AllDirectories).ToList();
-            DiffAnalyzerHelper.SaveFileSnapshots(scriptPaths);
-
-            await TypeSourceIndex.EnsureInitialized();
-            
-            // // 收集所有类型信息
-            await TypeInfoCollector.EnsureInitialized();
+            // 收集所有类型信息
+            await TypeInfoHelper.Initialized();
             
             // 获取工程名
             var projectName = Path.GetFileName(Path.GetDirectoryName(Application.dataPath));
@@ -95,41 +85,6 @@ namespace FastScriptReload.Editor
             {
                 Directory.CreateDirectory(AssemblyPath);
             }
-
-            _parseOptions = new CSharpParseOptions(
-                preprocessorSymbols: EditorUserBuildSettings.activeScriptCompilationDefines,
-                languageVersion: LanguageVersion.Latest
-            );
-        }
-        
-        /// <summary>
-        /// 获取或解析语法树（使用全局缓存的解析选项）
-        /// </summary>
-        public static SyntaxTree GetSyntaxTree(string filePath)
-        {
-            if (string.IsNullOrEmpty(filePath))
-            {
-                return null;
-            }
-
-            if (!File.Exists(filePath))
-            {
-                return null;
-            }
-
-            var content = File.ReadAllText(filePath);
-            if (string.IsNullOrEmpty(content))
-            {
-                return null;
-            }
-
-            var syntaxTree = CSharpSyntaxTree.ParseText(
-                content,
-                _parseOptions,
-                path: filePath
-            );
-
-            return syntaxTree;
         }
 
         /// <summary>
@@ -181,6 +136,12 @@ namespace FastScriptReload.Editor
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
                 if (AssemblyCache.ContainsKey(assembly.GetName().Name))
+                {
+                    continue;
+                }
+
+                if (assembly.GetName().Name.Contains("Mono.Cecil")
+                    || assembly.GetName().Name.Contains("Unity.Cecil"))
                 {
                     continue;
                 }
