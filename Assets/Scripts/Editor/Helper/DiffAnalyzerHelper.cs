@@ -1,8 +1,5 @@
-using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Reflection;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -11,117 +8,15 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace FastScriptReload.Editor
 {
     /// <summary>
-    /// 差异结果
-    /// </summary>
-    public class DiffResult
-    {
-        /// <summary>
-        /// 新增的方法
-        /// </summary>
-        public List<MethodDiffInfo> AddedMethods { get; } = new();
-
-        /// <summary>
-        /// 修改的方法
-        /// </summary>
-        public List<MethodDiffInfo> ModifiedMethods { get; } = new();
-
-        /// <summary>
-        /// 新增的字段
-        /// </summary>
-        public Dictionary<string, FieldDiffInfo> AddedFields { get; } = new();
-    }
-
-    /// <summary>
-    /// 方法差异信息
-    /// </summary>
-    public class MethodDiffInfo
-    {
-        /// <summary>
-        /// 方法全名（包含返回类型、声明类型、方法名、参数类型）
-        /// </summary>
-        public string FullName { get; set; }
-
-        /// <summary>
-        /// 方法名
-        /// </summary>
-        public string MethodName { get; set; }
-
-        /// <summary>
-        /// 声明类型全名
-        /// </summary>
-        public string DeclaringTypeFullName { get; set; }
-
-        /// <summary>
-        /// 是否为泛型方法
-        /// </summary>
-        public bool IsGenericMethod { get; set; }
-
-        /// <summary>
-        /// 是否有internal修饰符
-        /// </summary>
-        public bool HasInternalModifier { get; set; }
-
-        /// <summary>
-        /// 声明类型是否为internal类
-        /// </summary>
-        public bool IsDeclaringTypeInternal { get; set; }
-
-        /// <summary>
-        /// 方法定义节点
-        /// </summary>
-        public MethodDeclarationSyntax MethodDeclaration { get; set; }
-    }
-
-    /// <summary>
-    /// 字段差异信息
-    /// </summary>
-    public class FieldDiffInfo
-    {
-        /// <summary>
-        /// 字段全名
-        /// </summary>
-        public string FullName { get; set; }
-
-        /// <summary>
-        /// 字段名
-        /// </summary>
-        public string FieldName { get; set; }
-
-        /// <summary>
-        /// 声明类型全名
-        /// </summary>
-        public string DeclaringTypeFullName { get; set; }
-
-        /// <summary>
-        /// 是否有internal修饰符
-        /// </summary>
-        public bool HasInternalModifier { get; set; }
-
-        /// <summary>
-        /// 声明类型是否为internal类
-        /// </summary>
-        public bool IsDeclaringTypeInternal { get; set; }
-
-        /// <summary>
-        /// 字段定义节点
-        /// </summary>
-        public FieldDeclarationSyntax FieldDeclaration { get; set; }
-    }
-
-    /// <summary>
     /// 语法差异分析器 - 使用Roslyn进行源代码级别的差异分析
-    /// 功能：
-    /// 1. 比较原文件和改动文件中的类型差异（方法新增、方法修改、字段新增）
-    /// 2. 分析差异部分是否有引用internal（通过语法分析）
     /// </summary>
     public static class DiffAnalyzerHelper
     {
-        private static readonly SymbolDisplayFormat TEST_FORMAT = (SymbolDisplayFormat)typeof(SymbolDisplayFormat).GetField("TestFormat", BindingFlags.Static | BindingFlags.NonPublic)?.GetValue(null);
-
         /// <summary>
         /// 分析文件差异
         /// </summary>
-        public static void AnalyzeDiff(CSharpCompilation compilation, SyntaxTree newSyntaxTree, Dictionary<string, DiffResult> results)
+        public static void AnalyzeDiff(CSharpCompilation compilation, SyntaxTree newSyntaxTree,
+            Dictionary<string, DiffResult> results)
         {
             var filePath = newSyntaxTree.FilePath;
             var snapshot = TypeInfoHelper.GetFileSnapshot(filePath);
@@ -170,11 +65,6 @@ namespace FastScriptReload.Editor
                     // 类型存在，比较差异
                     CompareTypeMembers(oldType, newType, typeFullName, typeResult, newSemanticModel);
                 }
-                else
-                {
-                    // 新类型，所有成员都视为新增
-                    AddAllMembersAsNew(newType, typeFullName, typeResult, newSemanticModel);
-                }
 
                 // 只有当该类型有差异时才添加到结果中
                 if (typeResult.AddedMethods.Count > 0 ||
@@ -189,12 +79,8 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 比较类型成员的差异
         /// </summary>
-        private static void CompareTypeMembers(
-            TypeDeclarationSyntax oldType,
-            TypeDeclarationSyntax newType,
-            string typeFullName,
-            DiffResult result,
-            SemanticModel semanticModel)
+        private static void CompareTypeMembers(TypeDeclarationSyntax oldType, TypeDeclarationSyntax newType,
+            string typeFullName, DiffResult result, SemanticModel semanticModel)
         {
             var isInternalClass = IsInternalType(newType);
 
@@ -213,16 +99,16 @@ namespace FastScriptReload.Editor
                 if (!oldMethodMap.TryGetValue(methodSignature, out var oldMethod))
                 {
                     // 新增方法
-                    var methodInfo = CreateMethodDiffInfo(newMethod, typeFullName, isInternalClass, semanticModel);
-                    result.AddedMethods.Add(methodInfo);
+                    var methodInfo = CreateMethodDiffInfo(newMethod, semanticModel);
+                    result.AddedMethods.Add(methodInfo.FullName, methodInfo);
                 }
                 else
                 {
                     // 检查方法是否被修改（比较方法体）
                     if (IsMethodBodyChanged(oldMethod, newMethod))
                     {
-                        var methodInfo = CreateMethodDiffInfo(newMethod, typeFullName, isInternalClass, semanticModel);
-                        result.ModifiedMethods.Add(methodInfo);
+                        var methodInfo = CreateMethodDiffInfo(newMethod, semanticModel);
+                        result.ModifiedMethods.Add(methodInfo.FullName, methodInfo);
                     }
                 }
             }
@@ -247,36 +133,7 @@ namespace FastScriptReload.Editor
                 if (!oldFieldMap.TryGetValue(fieldName, out var oldFieldData))
                 {
                     // 新增字段
-                    var fieldInfo = CreateFieldDiffInfo(newFieldData.Field, newFieldData.Variable, typeFullName, isInternalClass, semanticModel);
-                    result.AddedFields.Add(fieldInfo.FullName, fieldInfo);
-                }
-            }
-        }
-
-        /// <summary>
-        /// 将类型的所有成员添加为新增
-        /// </summary>
-        private static void AddAllMembersAsNew(
-            TypeDeclarationSyntax type,
-            string typeFullName,
-            DiffResult result,
-            SemanticModel semanticModel)
-        {
-            var isInternalClass = IsInternalType(type);
-
-            // 添加所有方法
-            foreach (var method in type.Members.OfType<MethodDeclarationSyntax>())
-            {
-                var methodInfo = CreateMethodDiffInfo(method, typeFullName, isInternalClass, semanticModel);
-                result.AddedMethods.Add(methodInfo);
-            }
-
-            // 添加所有字段
-            foreach (var field in type.Members.OfType<FieldDeclarationSyntax>())
-            {
-                foreach (var variable in field.Declaration.Variables)
-                {
-                    var fieldInfo = CreateFieldDiffInfo(field, variable, typeFullName, isInternalClass, semanticModel);
+                    var fieldInfo = CreateFieldDiffInfo(newFieldData.Field, newFieldData.Variable, typeFullName, semanticModel);
                     result.AddedFields.Add(fieldInfo.FullName, fieldInfo);
                 }
             }
@@ -285,65 +142,36 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 创建方法差异信息
         /// </summary>
-        private static MethodDiffInfo CreateMethodDiffInfo(
-            MethodDeclarationSyntax method,
-            string declaringTypeFullName,
-            bool isDeclaringTypeInternal,
-            SemanticModel semanticModel)
+        private static MethodDiffInfo CreateMethodDiffInfo(MethodDeclarationSyntax method, SemanticModel semanticModel)
         {
-            var methodName = method.Identifier.ValueText;
             var isGeneric = method.TypeParameterList != null && method.TypeParameterList.Parameters.Count > 0;
-            var hasInternal = method.Modifiers.Any(m => m.IsKind(SyntaxKind.InternalKeyword));
-
-            // 获取返回类型的完整名称
-            var typeInfo = semanticModel.GetTypeInfo(method.ReturnType);
-            string returnType = typeInfo.Type?.ToDisplayString(TEST_FORMAT);
-
-            var parameters = method.ParameterList.Parameters.Count > 0
-                ? string.Join(",", method.ParameterList.Parameters.Select(p => p.Type?.ToString() ?? ""))
-                : "";
-
-            var fullName = $"{returnType} {declaringTypeFullName}::{methodName}({parameters})";
 
             return new MethodDiffInfo
             {
-                FullName = fullName,
-                MethodName = methodName,
-                DeclaringTypeFullName = declaringTypeFullName,
+                FullName = method.FullName(semanticModel),
                 IsGenericMethod = isGeneric,
-                HasInternalModifier = hasInternal,
-                IsDeclaringTypeInternal = isDeclaringTypeInternal,
-                MethodDeclaration = method
             };
         }
 
         /// <summary>
         /// 创建字段差异信息
         /// </summary>
-        private static FieldDiffInfo CreateFieldDiffInfo(
-            FieldDeclarationSyntax field,
-            VariableDeclaratorSyntax variable,
-            string declaringTypeFullName,
-            bool isDeclaringTypeInternal,
-            SemanticModel semanticModel)
+        private static FieldDiffInfo CreateFieldDiffInfo(FieldDeclarationSyntax field,
+            VariableDeclaratorSyntax variable, string declaringTypeFullName, SemanticModel semanticModel)
         {
             var fieldName = variable.Identifier.ValueText;
-            var hasInternal = field.Modifiers.Any(m => m.IsKind(SyntaxKind.InternalKeyword));
-            
+
             // 获取字段类型的完整名称
+            var containingType = semanticModel.GetDeclaredSymbol(variable)?.ContainingType.ToDisplayString(RoslynHelper.TYPE_FORMAT);
             var typeInfo = semanticModel.GetTypeInfo(field.Declaration.Type);
-            var fieldTypeFullName = typeInfo.Type?.ToDisplayString(TEST_FORMAT) ?? field.Declaration.Type.ToString();
-            
-            var fullName = $"{fieldTypeFullName} {declaringTypeFullName}::{fieldName}";
+            var fieldTypeFullName = typeInfo.Type?.ToDisplayString(RoslynHelper.TYPE_FORMAT) ?? field.Declaration.Type.ToString();
+
+            var fullName = $"{fieldTypeFullName} {containingType}::{fieldName}";
 
             return new FieldDiffInfo
             {
                 FullName = fullName,
-                FieldName = fieldName,
                 DeclaringTypeFullName = declaringTypeFullName,
-                HasInternalModifier = hasInternal,
-                IsDeclaringTypeInternal = isDeclaringTypeInternal,
-                FieldDeclaration = field
             };
         }
 
@@ -360,39 +188,8 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
-        /// 检查字段是否改变
-        /// </summary>
-        private static bool IsFieldChanged(
-            FieldDeclarationSyntax oldField,
-            VariableDeclaratorSyntax oldVariable,
-            FieldDeclarationSyntax newField,
-            VariableDeclaratorSyntax newVariable)
-        {
-            // 比较字段类型
-            var oldType = oldField.Declaration.Type?.ToString() ?? "";
-            var newType = newField.Declaration.Type?.ToString() ?? "";
-            if (oldType != newType)
-                return true;
-
-            // 比较字段修饰符（public, private, internal, static等）
-            var oldModifiers = string.Join(" ", oldField.Modifiers.Select(m => m.ToString()).OrderBy(m => m));
-            var newModifiers = string.Join(" ", newField.Modifiers.Select(m => m.ToString()).OrderBy(m => m));
-            if (oldModifiers != newModifiers)
-                return true;
-
-            // 比较字段初始化值
-            var oldInitializer = oldVariable.Initializer?.Value?.ToString() ?? "";
-            var newInitializer = newVariable.Initializer?.Value?.ToString() ?? "";
-            if (oldInitializer != newInitializer)
-                return true;
-
-            return false;
-        }
-
-        /// <summary>
         /// 获取方法签名（用于匹配）
         /// </summary>
-
         /// <summary>
         /// 检查类型是否为internal
         /// </summary>
@@ -400,110 +197,58 @@ namespace FastScriptReload.Editor
         {
             return typeDecl.Modifiers.Any(m => m.IsKind(SyntaxKind.InternalKeyword));
         }
+    }
+
+    /// <summary>
+    /// 差异结果
+    /// </summary>
+    public class DiffResult
+    {
+        /// <summary>
+        /// 新增的方法
+        /// </summary>
+        public Dictionary<string, MethodDiffInfo> AddedMethods { get; } = new();
 
         /// <summary>
-        /// 将泛型方法的调用者方法添加到差异结果的 ModifiedMethods 中
+        /// 修改的方法
         /// </summary>
-        /// <param name="callerMethodNames">调用者方法名集合，格式为 "ClassName::MethodName(parameters)"</param>
-        /// <param name="result">差异结果</param>
-        /// <param name="filePath">文件路径，用于查找方法声明</param>
-        /// <param name="compilation">Roslyn编译对象，用于语义分析</param>
-        public static void AddCallerMethodsToModified(HashSet<string> callerMethodNames, DiffResult result,
-            string filePath, CSharpCompilation compilation = null)
-        {
-            if (callerMethodNames == null || callerMethodNames.Count == 0 || result == null)
-                return;
-
-            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
-                return;
-
-            try
-            {
-                var syntaxTree = RoslynHelper.GetSyntaxTree(filePath);
-                if (syntaxTree == null)
-                    return;
-
-                var root = syntaxTree.GetRoot();
-                var typeDecls = root.DescendantNodes().OfType<TypeDeclarationSyntax>();
-
-                // 为语法树获取SemanticModel（如果提供了compilation）
-                SemanticModel semanticModel = null;
-                if (compilation != null)
-                {
-                    try
-                    {
-                        semanticModel = compilation.GetSemanticModel(syntaxTree);
-                    }
-                    catch (Exception ex)
-                    {
-                        LoggerScoped.LogDebug($"获取SemanticModel失败: {ex.Message}");
-                    }
-                }
-
-                foreach (var callerMethodName in callerMethodNames)
-                {
-                    // 解析调用者方法名：格式 "ClassName::MethodName(parameters)"
-                    if (!ParseCallerMethodName(callerMethodName, out var className, out var methodSignature))
-                        continue;
-
-                    // 查找对应的类型
-                    foreach (var typeDecl in typeDecls)
-                    {
-                        var typeFullName = typeDecl.FullName();
-                        if (typeFullName != className)
-                            continue;
-
-                        // 查找对应的方法
-                        var methods = typeDecl.Members.OfType<MethodDeclarationSyntax>();
-                        foreach (var method in methods)
-                        {
-                            var methodSig = method.FullName();
-                            if (methodSig == methodSignature)
-                            {
-                                // 找到匹配的方法，创建 MethodDiffInfo 并添加到 ModifiedMethods
-                                var isInternalClass = IsInternalType(typeDecl);
-                                var methodInfo = CreateMethodDiffInfo(method, typeFullName, isInternalClass, semanticModel);
-
-                                // 检查是否已存在（避免重复添加）
-                                if (result.ModifiedMethods.All(m => m.FullName != methodInfo.FullName))
-                                {
-                                    result.ModifiedMethods.Add(methodInfo);
-                                }
-
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogWarning($"添加调用者方法到修改列表失败: {filePath}, {ex.Message}");
-            }
-        }
+        public Dictionary<string, MethodDiffInfo> ModifiedMethods { get; } = new();
 
         /// <summary>
-        /// 解析调用者方法名，格式：ClassName::MethodName(parameters)
+        /// 新增的字段
         /// </summary>
-        private static bool ParseCallerMethodName(
-            string callerMethodName,
-            out string className,
-            out string methodSignature)
-        {
-            className = null;
-            methodSignature = null;
+        public Dictionary<string, FieldDiffInfo> AddedFields { get; } = new();
+    }
 
-            if (string.IsNullOrEmpty(callerMethodName))
-                return false;
+    /// <summary>
+    /// 方法差异信息
+    /// </summary>
+    public class MethodDiffInfo
+    {
+        /// <summary>
+        /// 方法全名（包含返回类型、声明类型、方法名、参数类型）
+        /// </summary>
+        public string FullName { get; set; }
 
-            var separatorIndex = callerMethodName.IndexOf("::", StringComparison.Ordinal);
-            if (separatorIndex < 0)
-                return false;
+        /// <summary>
+        /// 是否为泛型方法
+        /// </summary>
+        public bool IsGenericMethod { get; set; }
+    }
 
-            className = callerMethodName.Substring(0, separatorIndex);
-            methodSignature = callerMethodName.Substring(separatorIndex + 2);
-
-            return !string.IsNullOrEmpty(className) && !string.IsNullOrEmpty(methodSignature);
-        }
+    /// <summary>
+    /// 字段差异信息
+    /// </summary>
+    public class FieldDiffInfo
+    {
+        /// <summary>
+        /// 声明类型全名
+        /// </summary>
+        public string DeclaringTypeFullName { get; set; }
+        
+        /// <summary>
+        /// 字段全名
+        /// </summary>
+        public string FullName { get; set; }
     }
 }

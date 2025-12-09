@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -20,7 +21,7 @@ namespace FastScriptReload.Editor
         // 语义模型，用于获取方法符号信息
         private readonly SemanticModel _semanticModel;
         
-        // 当前正在访问的方法名（用于记录调用者）
+        // 当前正在访问的方法名（用于记录调用者，格式：ReturnType ClassName::MethodName(parameters)）
         private string _currentMethodName = null;
         
         // 当前正在访问的类名（用于构建完整的方法名）
@@ -41,7 +42,7 @@ namespace FastScriptReload.Editor
         /// </summary>
         public Dictionary<string, HashSet<string>> GetGenericMethodCalls()
         {
-            return new Dictionary<string, HashSet<string>>(_genericMethodCalls);
+            return _genericMethodCalls;
         }
 
         /// <summary>
@@ -77,11 +78,57 @@ namespace FastScriptReload.Editor
         public override void VisitMethodDeclaration(MethodDeclarationSyntax node)
         {
             var previousMethodName = _currentMethodName;
-            _currentMethodName = node.FullName();
+            
+            // 构建完整的方法名：ReturnType ClassName::MethodName(parameters)
+            _currentMethodName = GetFullMethodName(node);
             
             base.VisitMethodDeclaration(node);
             
             _currentMethodName = previousMethodName;
+        }
+        
+        /// <summary>
+        /// 获取完整的方法名（包含返回类型、类名、方法名和参数）
+        /// 格式：ReturnType ClassName::MethodName(parameters)
+        /// 参考 CreateMethodDiffInfo 的实现方式
+        /// </summary>
+        private string GetFullMethodName(MethodDeclarationSyntax method)
+        {
+            if (method == null)
+                throw new ArgumentNullException(nameof(method));
+            
+            if (string.IsNullOrEmpty(_currentClassName))
+                throw new InvalidOperationException($"无法获取方法名：当前类名为空。方法：{method.Identifier.ValueText}");
+            
+            // 处理引用返回类型（ref T）
+            string returnTypePrefix = "";
+            TypeSyntax typeToAnalyze = method.ReturnType;
+            
+            if (method.ReturnType is RefTypeSyntax refType)
+            {
+                returnTypePrefix = "ref ";
+                typeToAnalyze = refType.Type;
+            }
+            
+            // 获取返回类型（对于 ref T，需要分析内部的类型）
+            var returnTypeInfo = _semanticModel.GetTypeInfo(typeToAnalyze);
+            if (returnTypeInfo.Type == null)
+                throw new InvalidOperationException($"无法获取返回类型：方法 {_currentClassName}::{method.Identifier.ValueText}，返回类型节点：{method.ReturnType}");
+            
+            var returnType = returnTypeInfo.Type.ToDisplayString(RoslynHelper.TYPE_FORMAT);
+            if (string.IsNullOrEmpty(returnType))
+                throw new InvalidOperationException($"返回类型显示字符串为空：方法 {_currentClassName}::{method.Identifier.ValueText}，类型：{returnTypeInfo.Type}");
+            
+            // 组合返回类型（包含 ref 前缀）
+            var fullReturnType = returnTypePrefix + returnType;
+            
+            // 获取方法名和参数
+            var methodName = method.Identifier.ValueText;
+            var parameters = method.ParameterList.Parameters.Count > 0
+                ? string.Join(",", method.ParameterList.Parameters.Select(p => p.Type?.ToString() ?? ""))
+                : "";
+            
+            return $"{fullReturnType} {_currentClassName}::{methodName}({parameters})";
         }
 
         /// <summary>
@@ -90,7 +137,15 @@ namespace FastScriptReload.Editor
         public override void VisitConstructorDeclaration(ConstructorDeclarationSyntax node)
         {
             var previousMethodName = _currentMethodName;
-            _currentMethodName = node.Identifier.ValueText;
+            
+            // 构造函数返回类型是类本身
+            var returnType = _currentClassName ?? "void";
+            var methodName = node.Identifier.ValueText;
+            var parameters = node.ParameterList.Parameters.Count > 0
+                ? string.Join(",", node.ParameterList.Parameters.Select(p => p.Type?.ToString() ?? ""))
+                : "";
+            
+            _currentMethodName = $"{returnType} {_currentClassName}::{methodName}({parameters})";
             
             base.VisitConstructorDeclaration(node);
             
@@ -104,12 +159,26 @@ namespace FastScriptReload.Editor
         {
             var propertyName = node.Identifier.ValueText;
             
+            // 获取属性类型作为返回类型
+            var typeInfo = _semanticModel.GetTypeInfo(node.Type);
+            if (typeInfo.Type == null)
+                throw new InvalidOperationException($"无法获取属性类型：属性 {_currentClassName}::{propertyName}，类型节点：{node.Type}");
+            
+            var returnType = typeInfo.Type.ToDisplayString(RoslynHelper.TYPE_FORMAT);
+            if (string.IsNullOrEmpty(returnType))
+                throw new InvalidOperationException($"属性类型显示字符串为空：属性 {_currentClassName}::{propertyName}，类型：{typeInfo.Type}");
+            
             if (node.AccessorList != null)
             {
+                // 普通属性没有参数（索引器使用 IndexerDeclarationSyntax，不是 PropertyDeclarationSyntax）
+                var parameters = "";
+                
                 foreach (var accessor in node.AccessorList.Accessors)
                 {
                     var previousMethodName = _currentMethodName;
-                    _currentMethodName = $"{propertyName}.{accessor.Keyword.ValueText}";
+                    var accessorName = $"{propertyName}.{accessor.Keyword.ValueText}";
+                    
+                    _currentMethodName = $"{returnType} {_currentClassName}::{accessorName}({parameters})";
                     
                     base.VisitAccessorDeclaration(accessor);
                     
@@ -119,7 +188,7 @@ namespace FastScriptReload.Editor
             else if (node.ExpressionBody != null)
             {
                 var previousMethodName = _currentMethodName;
-                _currentMethodName = $"{propertyName}.get";
+                _currentMethodName = $"{returnType} {_currentClassName}::{propertyName}.get()";
                 
                 base.VisitPropertyDeclaration(node);
                 
@@ -137,7 +206,22 @@ namespace FastScriptReload.Editor
         public override void VisitOperatorDeclaration(OperatorDeclarationSyntax node)
         {
             var previousMethodName = _currentMethodName;
-            _currentMethodName = $"operator {node.OperatorToken.ValueText}";
+            
+            // 获取返回类型
+            var typeInfo = _semanticModel.GetTypeInfo(node.ReturnType);
+            if (typeInfo.Type == null)
+                throw new InvalidOperationException($"无法获取操作符返回类型：操作符 {node.OperatorToken.ValueText}，返回类型节点：{node.ReturnType}");
+            
+            var returnType = typeInfo.Type.ToDisplayString(RoslynHelper.TYPE_FORMAT);
+            if (string.IsNullOrEmpty(returnType))
+                throw new InvalidOperationException($"操作符返回类型显示字符串为空：操作符 {node.OperatorToken.ValueText}，类型：{typeInfo.Type}");
+            
+            var operatorName = $"operator {node.OperatorToken.ValueText}";
+            var parameters = node.ParameterList.Parameters.Count > 0
+                ? string.Join(",", node.ParameterList.Parameters.Select(p => p.Type?.ToString() ?? ""))
+                : "";
+            
+            _currentMethodName = $"{returnType} {_currentClassName}::{operatorName}({parameters})";
             
             base.VisitOperatorDeclaration(node);
             
@@ -150,7 +234,22 @@ namespace FastScriptReload.Editor
         public override void VisitConversionOperatorDeclaration(ConversionOperatorDeclarationSyntax node)
         {
             var previousMethodName = _currentMethodName;
-            _currentMethodName = $"operator {node.Type?.ToString() ?? ""}";
+            
+            // 转换操作符的返回类型就是转换的目标类型（使用 TEST_FORMAT，与其他方法一致）
+            var typeInfo = _semanticModel.GetTypeInfo(node.Type);
+            if (typeInfo.Type == null)
+                throw new InvalidOperationException($"无法获取转换操作符目标类型：转换操作符，目标类型节点：{node.Type}");
+            
+            var returnType = typeInfo.Type.ToDisplayString(RoslynHelper.TYPE_FORMAT);
+            if (string.IsNullOrEmpty(returnType))
+                throw new InvalidOperationException($"转换操作符目标类型显示字符串为空：转换操作符，类型：{typeInfo.Type}");
+            
+            var operatorName = $"operator {returnType}";
+            var parameters = node.ParameterList.Parameters.Count > 0
+                ? string.Join(",", node.ParameterList.Parameters.Select(p => p.Type?.ToString() ?? ""))
+                : "";
+            
+            _currentMethodName = $"{returnType} {_currentClassName}::{operatorName}({parameters})";
             
             base.VisitConversionOperatorDeclaration(node);
             
@@ -167,7 +266,18 @@ namespace FastScriptReload.Editor
                 if (variable.Initializer?.Value != null)
                 {
                     var previousMethodName = _currentMethodName;
-                    _currentMethodName = $"field.{variable.Identifier.ValueText}";
+                    
+                    // 获取字段类型作为返回类型
+                    var typeInfo = _semanticModel.GetTypeInfo(node.Declaration.Type);
+                    if (typeInfo.Type == null)
+                        throw new InvalidOperationException($"无法获取字段类型：字段 {variable.Identifier.ValueText}，类型节点：{node.Declaration.Type}");
+                    
+                    var returnType = typeInfo.Type.ToDisplayString(RoslynHelper.TYPE_FORMAT);
+                    if (string.IsNullOrEmpty(returnType))
+                        throw new InvalidOperationException($"字段类型显示字符串为空：字段 {variable.Identifier.ValueText}，类型：{typeInfo.Type}");
+                    
+                    var fieldName = $"field.{variable.Identifier.ValueText}";
+                    _currentMethodName = $"{returnType} {_currentClassName}::{fieldName}()";
                     
                     Visit(variable.Initializer.Value);
                     
@@ -197,72 +307,46 @@ namespace FastScriptReload.Editor
             if (_currentMethodName == null)
                 return;
 
-            try
+            // 通过语义模型获取方法符号
+            var symbolInfo = _semanticModel.GetSymbolInfo(invocation);
+            
+            if (symbolInfo.Symbol is IMethodSymbol methodSymbol && methodSymbol.IsGenericMethod)
             {
-                // 方法1: 通过语义模型获取方法符号
-                var symbolInfo = _semanticModel.GetSymbolInfo(invocation);
+                var genericMethodFullName = GetMethodDefinitionNameFromSymbol(methodSymbol);
+                if (string.IsNullOrEmpty(genericMethodFullName))
+                    throw new InvalidOperationException($"无法获取泛型方法定义名称：调用处方法 {_currentMethodName}，方法符号 {methodSymbol}");
                 
-                if (symbolInfo.Symbol is IMethodSymbol methodSymbol && methodSymbol.IsGenericMethod)
-                {
-                    var genericMethodFullName = GetMethodDefinitionNameFromSymbol(methodSymbol);
-                    if (!string.IsNullOrEmpty(genericMethodFullName))
-                    {
-                        AddGenericMethodCall(genericMethodFullName, _currentMethodName);
-                    }
-                }
-                // 检查候选符号（可能由于重载解析失败）
-                else if (symbolInfo.CandidateSymbols.Any())
-                {
-                    foreach (var candidate in symbolInfo.CandidateSymbols)
-                    {
-                        if (candidate is IMethodSymbol candidateMethod && candidateMethod.IsGenericMethod)
-                        {
-                            var genericMethodFullName = GetMethodDefinitionNameFromSymbol(candidateMethod);
-                            if (!string.IsNullOrEmpty(genericMethodFullName))
-                            {
-                                AddGenericMethodCall(genericMethodFullName, _currentMethodName);
-                                break; // 找到一个就够了
-                            }
-                        }
-                    }
-                }
-                // 方法2: 如果语义模型无法解析，尝试通过语法检测泛型方法调用
-                else if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
-                {
-                    if (memberAccess.Name is GenericNameSyntax genericName)
-                    {
-                        // 尝试从接收者类型获取方法
-                        var receiverTypeInfo = _semanticModel.GetTypeInfo(memberAccess.Expression);
-                        var receiverType = receiverTypeInfo.ConvertedType as INamedTypeSymbol 
-                                           ?? receiverTypeInfo.Type as INamedTypeSymbol;
-                        
-                        if (receiverType != null)
-                        {
-                            var methodName = genericName.Identifier.ValueText;
-                            var methods = receiverType.GetMembers(methodName).OfType<IMethodSymbol>();
-                            
-                            // 查找泛型方法（匹配泛型参数数量）
-                            var typeArgCount = genericName.TypeArgumentList.Arguments.Count;
-                            var genericMethod = methods.FirstOrDefault(m => 
-                                m.IsGenericMethod && 
-                                m.TypeParameters.Length == typeArgCount);
-                            
-                            if (genericMethod != null)
-                            {
-                                var genericMethodFullName = GetMethodDefinitionNameFromSymbol(genericMethod);
-                                if (!string.IsNullOrEmpty(genericMethodFullName))
-                                {
-                                    AddGenericMethodCall(genericMethodFullName, _currentMethodName);
-                                }
-                            }
-                        }
-                    }
-                }
+                AddGenericMethodCall(genericMethodFullName, _currentMethodName);
+                return;
             }
-            catch (Exception)
+            
+            // 检查候选符号（可能由于重载解析失败）
+            if (symbolInfo.CandidateSymbols.Any())
             {
-                // 忽略错误，继续处理其他调用
+                foreach (var candidate in symbolInfo.CandidateSymbols)
+                {
+                    if (candidate is IMethodSymbol candidateMethod && candidateMethod.IsGenericMethod)
+                    {
+                        var genericMethodFullName = GetMethodDefinitionNameFromSymbol(candidateMethod);
+                        if (string.IsNullOrEmpty(genericMethodFullName))
+                            throw new InvalidOperationException($"无法获取候选泛型方法定义名称：调用处方法 {_currentMethodName}，候选方法符号 {candidateMethod}");
+                        
+                        AddGenericMethodCall(genericMethodFullName, _currentMethodName);
+                        return;
+                    }
+                }
             }
+            
+            // 如果不是泛型方法调用，直接返回（大多数调用都不是泛型方法）
+            // 只有在语法上明确是泛型方法调用但无法解析时才抛出错误
+            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess && 
+                memberAccess.Name is GenericNameSyntax)
+            {
+                // 语法上看起来是泛型方法调用，但语义模型无法解析
+                throw new InvalidOperationException($"无法解析泛型方法调用：调用处方法 {_currentMethodName}，调用表达式位置 {invocation.GetLocation().GetLineSpan()}");
+            }
+            
+            // 否则，这不是泛型方法调用，直接返回
         }
 
         /// <summary>
@@ -297,11 +381,11 @@ namespace FastScriptReload.Editor
             else
             {
                 // 返回类型是具体类型，使用简单格式（不包含 global:: 前缀）
-                returnType = originalMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+                returnType = originalMethod.ReturnType.ToDisplayString(RoslynHelper.TYPE_FORMAT);
             }
             
-            // 获取声明类型（使用简单格式，不包含 global:: 前缀）
-            var declaringType = originalMethod.ContainingType?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat) ?? "Unknown";
+            // 获取声明类型（使用 TEST_FORMAT 以包含完整的命名空间）
+            var declaringType = originalMethod.ContainingType?.ToDisplayString(RoslynHelper.TYPE_FORMAT) ?? "Unknown";
             
             // 获取方法名
             var methodName = originalMethod.Name;
@@ -314,8 +398,8 @@ namespace FastScriptReload.Editor
                 {
                     return typeParam.Name;
                 }
-                // 对于其他类型，使用简单格式
-                return p.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+                // 对于其他类型，使用 TEST_FORMAT 以保持一致性
+                return p.Type.ToDisplayString(RoslynHelper.TYPE_FORMAT);
             });
             
             var parameterList = string.Join(",", parameters);
@@ -323,10 +407,6 @@ namespace FastScriptReload.Editor
             // 构建定义格式：ReturnType DeclaringType::MethodName(ParameterTypes)
             return $"{returnType} {declaringType}::{methodName}({parameterList})";
         }
-
-        /// <summary>
-        /// 获取类型全名（支持嵌套类型）
-        /// </summary>
     }
 }
 
