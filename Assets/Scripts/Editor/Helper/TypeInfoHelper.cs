@@ -3,12 +3,12 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Threading.Tasks;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using UnityEngine;
+using UnityEngine.Profiling;
 
 namespace FastScriptReload.Editor
 {
@@ -26,7 +26,7 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 初始化并收集所有类型信息
         /// </summary>
-        public static async Task Initialized()
+        public static void Initialized()
         {
             if (!(bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles.GetEditorPersistedValueOrDefault())
             {
@@ -52,22 +52,27 @@ namespace FastScriptReload.Editor
 
             return fileSnapshot;
         }
+        
+        public static SemanticModel GetSemanticModel(SyntaxTree tree)
+        {
+            return _compilation.GetSemanticModel(tree);
+        }
 
         /// <summary>
         /// 更新多个文件的类型信息
         /// </summary>
-        public static void UpdateTypeInfoForFiles(IEnumerable<string> filePaths)
+        public static void UpdateTypeInfoForFiles(Dictionary<string, SyntaxTree> filePaths)
         {
-            foreach (var filePath in filePaths)
+            foreach (var (filePath, syntaxTree) in filePaths)
             {
-                UpdateTypeInfoForFile(filePath);
+                UpdateTypeInfoForFile(filePath, syntaxTree);
             }
         }
 
         /// <summary>
         /// 更新单个文件的类型信息
         /// </summary>
-        public static void UpdateTypeInfoForFile(string filePath)
+        public static void UpdateTypeInfoForFile(string filePath, SyntaxTree newSyntaxTree)
         {
             try
             {
@@ -77,7 +82,6 @@ namespace FastScriptReload.Editor
                 }
 
                 var oldSyntaxTree = fileSnapshot.SyntaxTree;
-                var newSyntaxTree = RoslynHelper.GetSyntaxTree(filePath);
                 fileSnapshot.SyntaxTree = newSyntaxTree;
 
                 _compilation = _compilation.ReplaceSyntaxTree(oldSyntaxTree, fileSnapshot.SyntaxTree);
@@ -131,11 +135,13 @@ namespace FastScriptReload.Editor
                 ReloadHelper.GetOrResolveAssemblyReferences(),
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
+            Profiler.BeginSample("CollectTypeInfoFromFile");
             foreach (var tree in syntaxTrees)
             {
                 var semanticModel = _compilation.GetSemanticModel(tree);
                 CollectTypeInfoFromFile(semanticModel);
             }
+            Profiler.EndSample();
 
             stopwatch.Stop();
             LoggerScoped.Log($"类型信息收集完成，耗时: {stopwatch.ElapsedMilliseconds}ms, 收集类型数: {TypeInfoCache.Count}");
@@ -198,7 +204,7 @@ namespace FastScriptReload.Editor
 
                     typeInfo.FilePaths.Add(filePath);
                     
-                    CollectInternalMembers(typeInfo, typeDecl);
+                    CollectInternalMembers(typeInfo, typeDecl, semanticModel);
                     CollectUsedGenericMethods(typeInfo, typeDecl, semanticModel);
                 }
             }
@@ -208,7 +214,7 @@ namespace FastScriptReload.Editor
             }
         }
 
-        private static void CollectInternalMembers(TypeInfo typeInfo, TypeDeclarationSyntax typeDecl)
+        private static void CollectInternalMembers(TypeInfo typeInfo, TypeDeclarationSyntax typeDecl, SemanticModel semanticModel)
         {
             typeInfo.IsInternalClass = typeDecl.Modifiers.Any(m => m.IsKind(SyntaxKind.InternalKeyword));
 
@@ -216,7 +222,7 @@ namespace FastScriptReload.Editor
             {
                 if (method.Modifiers.Any(m => m.IsKind(SyntaxKind.InternalKeyword)))
                 {
-                    typeInfo.InternalMember.Add(method.FullName());
+                    typeInfo.InternalMember.Add(method.FullName(semanticModel));
                 }
             }
 
@@ -243,7 +249,7 @@ namespace FastScriptReload.Editor
 
         private static void CollectUsedGenericMethods(TypeInfo typeInfo, TypeDeclarationSyntax typeDecl, SemanticModel semanticModel)
         {
-            var className = typeDecl.FullName();
+            var filePath = semanticModel.SyntaxTree.FilePath;
             var walker = new GenericMethodCallWalker(semanticModel);
             walker.Visit(typeDecl);
 
@@ -252,14 +258,13 @@ namespace FastScriptReload.Editor
             {
                 if (!typeInfo.UsedGenericMethods.TryGetValue(kvp.Key, out var existingCallers))
                 {
-                    existingCallers = new HashSet<string>();
+                    existingCallers = new HashSet<GenericMethodCallInfo>();
                     typeInfo.UsedGenericMethods[kvp.Key] = existingCallers;
                 }
 
                 foreach (var caller in kvp.Value)
                 {
-                    var formattedCaller = caller.Contains("::") ? caller : $"{className}::{caller}";
-                    existingCallers.Add(formattedCaller);
+                    existingCallers.Add(new GenericMethodCallInfo(filePath, caller));
                 }
             }
         }
@@ -276,6 +281,39 @@ namespace FastScriptReload.Editor
     }
 
     /// <summary>
+    /// 泛型方法调用信息
+    /// </summary>
+    public struct GenericMethodCallInfo : IEquatable<GenericMethodCallInfo>
+    {
+        public readonly string FilePath;
+        public readonly string MethodName;
+
+        public GenericMethodCallInfo(string filePath, string methodName)
+        {
+            FilePath = filePath;
+            MethodName = methodName;
+        }
+
+        public bool Equals(GenericMethodCallInfo other)
+        {
+            return FilePath == other.FilePath && MethodName == other.MethodName;
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is GenericMethodCallInfo other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                return ((FilePath?.GetHashCode() ?? 0) * 397) ^ (MethodName?.GetHashCode() ?? 0);
+            }
+        }
+    }
+
+    /// <summary>
     /// 类型信息，包含使用Roslyn收集的类型元数据
     /// </summary>
     public class TypeInfo
@@ -285,8 +323,8 @@ namespace FastScriptReload.Editor
         // 类型所在文件路径
         // public string FilePath;
 
-        // 类型中使用的泛型方法（Key: 调用的泛型方法全名, Value: 调用处的方法名）
-        public readonly Dictionary<string, HashSet<string>> UsedGenericMethods = new();
+        // 类型中使用的泛型方法（Key: 调用的泛型方法全名, Value: (调用处文件所在路径, 调用处的方法名)）
+        public readonly Dictionary<string, HashSet<GenericMethodCallInfo>> UsedGenericMethods = new();
 
         // 类型中的internal字段
         public readonly HashSet<string> InternalMember = new();

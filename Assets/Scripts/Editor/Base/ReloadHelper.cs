@@ -58,7 +58,7 @@ namespace FastScriptReload.Editor
             }
 
             // 收集所有类型信息
-            await TypeInfoHelper.Initialized();
+            TypeInfoHelper.Initialized();
             
             // 获取工程名
             var projectName = Path.GetFileName(Path.GetDirectoryName(Application.dataPath));

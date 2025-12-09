@@ -86,22 +86,19 @@ namespace FastScriptReload.Editor
                         hookTypeInfo.AddedFields.TryAdd(fieldDefinition.FullName, fieldDefinition);
                     }
                 }
-                
-                HashSet<MethodDefinition> hookMethods = new();
-                
+
                 var originalMethods = originalType.GetAllMethods();
 
-                void HandleModifyMethod(List<MethodDiffInfo> methodDiffInfos, HookMethodState hookMethodState)
+                void HandleModifyMethod(Dictionary<string, MethodDiffInfo> methodDiffInfos, HookMethodState hookMethodState)
                 {
-                    foreach (var methodDiffInfo in methodDiffInfos)
+                    foreach (var methodDef in typeDef.Methods.ToArray())
                     {
-                        var hookMethodName = methodDiffInfo.FullName;
-
-                        var methodDef = typeDef.Methods.FirstOrDefault((definition => definition.FullName == hookMethodName));
-                        if (methodDef == null)
+                        if (!methodDiffInfos.TryGetValue(methodDef.FullName, out var methodDiffInfo))
                         {
                             continue;
                         }
+
+                        var hookMethodName = methodDef.FullName;
                         
                         var newMethodDef = ModifyMethod(mainModule, methodDef, mainModule.ImportReference(originalType));
                         if (!hookTypeInfo.ModifiedMethods.TryGetValue(hookMethodName, out var hookMethodInfo))
@@ -116,33 +113,14 @@ namespace FastScriptReload.Editor
                         }
                         
                         typeDef.Methods.Add(newMethodDef);
-                        hookMethods.Add(newMethodDef);
                     }
                 }
-                
+
                 // 处理添加的方法
                 HandleModifyMethod(result.AddedMethods, HookMethodState.Added);
 
                 // 处理修改的方法
                 HandleModifyMethod(result.ModifiedMethods, HookMethodState.Modified);
-                
-                // 清理方法并提交修改过后的方法
-                typeDef.Methods.Clear();
-                foreach (var method in hookMethods)
-                {
-                    typeDef.Methods.Add(method);
-                }
-
-                // 清理字段
-                foreach (var fieldDef in typeDef.Fields.ToArray())
-                {
-                    if (!result.AddedFields.ContainsKey(fieldDef.FullName))
-                    {
-                        typeDef.Fields.Remove(fieldDef);
-                    }
-                }
-
-                typeDef.Properties.Clear();
             }
         }
 
@@ -178,7 +156,30 @@ namespace FastScriptReload.Editor
                 if (!results.TryGetValue(typeDef.FullName, out var result))
                 {
                     mainModule.Types.Remove(typeDef);
+                    continue;
                 }
+
+                // 清理方法
+                if (HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
+                {
+                    typeDef.Methods.Clear();
+                    var methodNamesToAdd = result.ModifiedMethods.Concat(result.AddedMethods);
+                    foreach (var (methodFullName, _) in methodNamesToAdd)
+                    {
+                        typeDef.Methods.Add(hookTypeInfo.ModifiedMethods[methodFullName].MethodDefinition);
+                    }
+                }
+
+                // 清理字段
+                foreach (var fieldDef in typeDef.Fields.ToArray())
+                {
+                    if (!result.AddedFields.ContainsKey(fieldDef.FullName))
+                    {
+                        typeDef.Fields.Remove(fieldDef);
+                    }
+                }
+
+                typeDef.Properties.Clear();
             }
         }
 
@@ -320,13 +321,28 @@ namespace FastScriptReload.Editor
         /// </summary>
         private static void HandleMethodReference(ILProcessor processor, ModuleDefinition module, Instruction sourceInst, MethodReference methodRef)
         {
-            // 处理新增方法调用
-            if (HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookType)
-                && hookType.TryGetAddedMethod(methodRef.FullName, out var addedMethodInfo))
+            if (HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookType))
             {
-                methodRef = module.ImportReference(addedMethodInfo.MethodDefinition);
-                processor.Append(Instruction.Create(sourceInst.OpCode, methodRef));
-                return;
+                // 处理新增方法调用
+                if (hookType.TryGetAddedMethod(methodRef.FullName, out var addedMethodInfo))
+                {
+                    methodRef = module.ImportReference(addedMethodInfo.MethodDefinition);
+                    processor.Append(Instruction.Create(sourceInst.OpCode, methodRef));
+                    return;
+                }
+
+                // 处理泛型方法调用
+                if (methodRef.IsGenericInstance && hookType.ModifiedMethods.TryGetValue(methodRef.GetElementMethod().FullName, out var modifiedMethodInfo))
+                {
+                    // 导入修改后的方法定义（泛型方法定义）
+                    var elementMethodRef = module.ImportReference(modifiedMethodInfo.MethodDefinition);
+
+                    // 从源方法引用创建泛型实例方法，复制泛型参数
+                    var genericInstanceMethod = MonoCecilHelper.CreateGenericInstanceMethodFromSource(elementMethodRef, methodRef,
+                        typeRef => GetOriginalType(module, typeRef));
+                    processor.Append(Instruction.Create(sourceInst.OpCode, genericInstanceMethod));
+                    return;
+                }
             }
 
             var originalMethodRef = GetOriginalMethodReference(module, methodRef);

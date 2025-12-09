@@ -45,34 +45,6 @@ namespace FastScriptReload.Editor
         }
 #endif
 
-        /// <summary>
-        /// 获取方法的完整签名名称
-        /// </summary>
-        public static string FullName(this MethodBase member)
-        {
-            Type returnType = AccessTools.GetReturnedType(member);
-
-            StringBuilder builder = new StringBuilder();
-            builder.Append(returnType.FullName).Append(" ").Append(member.DeclaringType == null
-                ? member.Name
-                : member.DeclaringType.FullName + "::" + member.Name);
-            builder.Append("(");
-            if (member.GetParameters().Length > 0)
-            {
-                var parameters = member.GetParameters();
-                for (int index = 0; index < parameters.Length; ++index)
-                {
-                    var parameterDefinition = parameters[index];
-                    if (index > 0)
-                        builder.Append(",");
-                    builder.Append(parameterDefinition.ParameterType.FullName);
-                }
-            }
-
-            builder.Append(")");
-            return builder.ToString();
-        }
-
         public static MethodBase[] GetAllMethods(this Type type)
         {
             var flags = BindingFlags.Public | BindingFlags.NonPublic |
