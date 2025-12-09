@@ -50,14 +50,17 @@ namespace FastScriptReload.Editor
 
                 // 获取 Wrapper 类型中的所有静态方法（公有和私有）
                 var wrapperMethods = wrapperType.GetAllMethods();
-                foreach (var resultModified in result.ModifiedMethods)
+                foreach (var (methodName, methodDiffInfo) in result.ModifiedMethods)
                 {
-                    if (!hookTypeInfo.ModifiedMethods.TryGetValue(resultModified.FullName, out var modifiedMethod))
+                    if (!hookTypeInfo.ModifiedMethods.TryGetValue(methodName, out var modifiedMethod))
                     {
                         continue;
                     }
 
-                    var methodName = resultModified.FullName;
+                    if (modifiedMethod.MethodDefinition.IsGenericInstance)
+                    {
+                        continue;
+                    }
 
                     var wrapperMethod = wrapperMethods.FirstOrDefault(m => m.FullName() == modifiedMethod.WrapperMethodName);
                     if (wrapperMethod == null)

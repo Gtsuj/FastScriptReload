@@ -56,7 +56,7 @@ namespace FastScriptReload.Editor
                 }
 
                 // 更新缓存的类型信息
-                TypeInfoHelper.UpdateTypeInfoForFiles(csFilePaths);
+                TypeInfoHelper.UpdateTypeInfoForFiles(syntaxTrees);
 
                 // 收集需要编译的文件
                 CollectFilesToCompile(csFilePaths, syntaxTrees, typeDiffs);
@@ -94,13 +94,7 @@ namespace FastScriptReload.Editor
         {
             var processedFiles = new HashSet<string>();
             // 待处理文件队列
-            var filesToProcess = new Queue<string>();
-
-            // 从 csFilePaths 收集初始文件
-            foreach (var filePath in csFilePaths)
-            {
-                filesToProcess.Enqueue(filePath);
-            }
+            var filesToProcess = new Queue<string>(csFilePaths);
 
             // 添加过方法、属性的类型加入编译列表
             foreach (var (_, hookTypeInfo) in HookTypeInfoCache)
@@ -144,16 +138,7 @@ namespace FastScriptReload.Editor
 
                 syntaxTrees.TryAdd(filePath, syntaxTree);
 
-                // 创建临时编译以获取语义模型
-                // 只需要当前文件的语法树和程序集引用即可，TypeDependencyWalker 主要用于获取类型名称
-                var tempCompilation = CSharpCompilation.Create(
-                    "Temp",
-                    new[] { syntaxTree },
-                    GetOrResolveAssemblyReferences(),
-                    new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-                );
-
-                var semanticModel = tempCompilation.GetSemanticModel(syntaxTree);
+                var semanticModel = TypeInfoHelper.GetSemanticModel(syntaxTree);
                 var root = syntaxTree.GetRoot();
 
                 // 获取文件中定义的所有类型
@@ -215,28 +200,82 @@ namespace FastScriptReload.Editor
         /// <param name="filesToProcess"></param>
         private static void CollectionGenericMethodCaller(Dictionary<string, DiffResult> typeDiffs, Queue<string> filesToProcess)
         {
+            HashSet<string> handleMethod = new();
+            // 遍历修改的方法，收集修改的泛型方法
             foreach (var (_, diff) in typeDiffs)
             {
-                foreach (var modifiedMethod in diff.ModifiedMethods)
+                foreach (var (_, modifiedMethod) in diff.ModifiedMethods)
                 {
                     if (!modifiedMethod.IsGenericMethod)
                     {
                         continue;
                     }
 
-                    foreach (var (_, typeInfo) in TypeInfoHelper.TypeInfoCache)
+                    handleMethod.Add(modifiedMethod.FullName);
+                }
+            }
+
+            // 预先构建映射关系：泛型方法 FullName -> HashSet<类型名>
+            var genericMethodToCallerTypes = new Dictionary<string, HashSet<string>>();
+            foreach (var (typeFullName, typeInfo) in TypeInfoHelper.TypeInfoCache)
+            {
+                foreach (var (genericMethodFullName, _) in typeInfo.UsedGenericMethods)
+                {
+                    if (!genericMethodToCallerTypes.TryGetValue(genericMethodFullName, out var callerTypes))
                     {
-                        if (!typeInfo.UsedGenericMethods.TryGetValue(modifiedMethod.FullName, out var useGenericInfo))
+                        callerTypes = new HashSet<string>();
+                        genericMethodToCallerTypes[genericMethodFullName] = callerTypes;
+                    }
+                    callerTypes.Add(typeFullName);
+                }
+            }
+            
+            // 将泛型方法的调用者加入修改列表
+            foreach (var methodName in handleMethod)
+            {
+                if (!genericMethodToCallerTypes.TryGetValue(methodName, out var callerTypeNames))
+                {
+                    continue;
+                }
+
+                foreach (var typeFullName in callerTypeNames)
+                {
+                    var callTypeInfo = TypeInfoHelper.TypeInfoCache.GetValueOrDefault(typeFullName);
+                    if (callTypeInfo == null)
+                    {
+                        continue;
+                    }
+
+                    if (!callTypeInfo.UsedGenericMethods.TryGetValue(methodName, out var useGenericInfo))
+                    {
+                        continue;
+                    }
+
+                    // 将调用者加入修改列表
+                    foreach (var callInfo in useGenericInfo)
+                    {
+                        if (!typeDiffs.TryGetValue(typeFullName, out var callTypeDiff))
                         {
-                            continue;
+                            callTypeDiff = new DiffResult();
+                            typeDiffs.Add(typeFullName, callTypeDiff);
                         }
 
-                        foreach (var filePath in typeInfo.FilePaths)
+                        if (!callTypeDiff.ModifiedMethods.ContainsKey(callInfo.MethodName))
                         {
-                            filesToProcess.Enqueue(filePath);
+                            callTypeDiff.ModifiedMethods.Add(callInfo.MethodName, new MethodDiffInfo()
+                            {
+                                FullName = callInfo.MethodName
+                            });
                         }
+                            
                     }
-                }
+
+                    // 从泛型方法调用信息中获取文件路径
+                    foreach (var filePath in callTypeInfo.FilePaths)
+                    {
+                        filesToProcess.Enqueue(filePath);
+                    }
+                }                
             }
         }
     }

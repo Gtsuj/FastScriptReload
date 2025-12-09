@@ -216,8 +216,7 @@ namespace FastScriptReload.Editor
         /// <param name="sourceMethodRef">源方法引用（用于复制泛型参数）</param>
         /// <param name="typeConverter">类型转换函数（可选，用于转换泛型参数类型）</param>
         /// <returns>泛型实例方法引用</returns>
-        public static MethodReference CreateGenericInstanceMethodFromSource(
-            MethodReference elementMethod, MethodReference sourceMethodRef,
+        public static MethodReference CreateGenericInstanceMethodFromSource(MethodReference elementMethod, MethodReference sourceMethodRef,
             Func<TypeReference, TypeReference> typeConverter = null)
         {
             if (elementMethod == null)
