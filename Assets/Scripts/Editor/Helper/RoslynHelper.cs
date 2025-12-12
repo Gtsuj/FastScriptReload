@@ -15,7 +15,8 @@ namespace FastScriptReload.Editor
     public static class RoslynHelper
     {
         public static readonly SymbolDisplayFormat TYPE_FORMAT =
-            new(typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces);
+            new SymbolDisplayFormat(typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces,
+                genericsOptions: SymbolDisplayGenericsOptions.IncludeTypeParameters,parameterOptions: SymbolDisplayParameterOptions.IncludeType);
 
         public static readonly SymbolDisplayFormat METHOD_FORMAT =
             new(typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces,
@@ -169,7 +170,9 @@ namespace FastScriptReload.Editor
                 }
                 else
                 {
-                    builder.Append(param.Type.ToDisplayString(TYPE_FORMAT));
+                    var paramTypeName = param.Type.ToDisplayString(TYPE_FORMAT);
+                    paramTypeName = paramTypeName.Replace(param.Type.Name, param.Type.MetadataName);
+                    builder.Append(paramTypeName);
                 }
             }
 

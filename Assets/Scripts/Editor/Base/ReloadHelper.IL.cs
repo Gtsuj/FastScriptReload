@@ -424,7 +424,7 @@ namespace FastScriptReload.Editor
             if (originalMethodRef == null)
             {
                 LoggerScoped.LogWarning($"从原程序集获取方法引用失败: {methodRef.FullName}");
-                originalMethodRef = methodRef;
+                originalMethodRef = module.ImportReference(methodRef);
             }
 
             processor.Append(Instruction.Create(sourceInst.OpCode, originalMethodRef));
