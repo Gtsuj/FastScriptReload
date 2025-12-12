@@ -50,13 +50,14 @@ namespace FastScriptReload.Editor
         /// 初始化
         /// </summary>
         [InitializeOnEnterPlayMode]
-        public static async void Init()
+        public static void Init()
         {
             if (!(bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles.GetEditorPersistedValueOrDefault())
             {
                 return;
             }
 
+            _ = RoslynHelper.PARSE_OPTIONS;
             // 收集所有类型信息
             TypeInfoHelper.Initialized();
             

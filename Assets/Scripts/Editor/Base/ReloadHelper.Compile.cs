@@ -50,13 +50,13 @@ namespace FastScriptReload.Editor
                     DiffAnalyzerHelper.AnalyzeDiff(compilation, syntaxTree, typeDiffs);
                 }
 
+                // 更新缓存的类型信息
+                TypeInfoHelper.UpdateTypeInfoForFiles(syntaxTrees);
+                
                 if (typeDiffs.Count == 0)
                 {
                     return null;
                 }
-
-                // 更新缓存的类型信息
-                TypeInfoHelper.UpdateTypeInfoForFiles(syntaxTrees);
 
                 // 收集需要编译的文件
                 CollectFilesToCompile(csFilePaths, syntaxTrees, typeDiffs);
