@@ -28,9 +28,6 @@ namespace FastScriptReload.Editor
             // 清理程序集
             ClearAssembly(results);
 
-            // 添加必要的引用
-            AddRequiredReferences(_assemblyDefinition, HookTypeInfoCache.Values.ToList());
-
             // 生成文件名并保存
             var filePath = Path.Combine(AssemblyPath, $"{_assemblyDefinition.Name.Name}.dll");
 
@@ -55,6 +52,11 @@ namespace FastScriptReload.Editor
         private static void HandleAssemblyType(Dictionary<string, DiffResult> results)
         {
             var mainModule = _assemblyDefinition.MainModule;
+            
+            // 用于存储源方法定义的映射（阶段2需要）
+            var sourceMethodMap = new Dictionary<string, Dictionary<string, MethodDefinition>>();
+            
+            // ====== 阶段1：预注册所有方法签名（仅创建签名，不处理方法体） ======
             foreach (var typeDef in mainModule.Types)
             {
                 if (!results.TryGetValue(typeDef.FullName, out DiffResult result))
@@ -89,7 +91,12 @@ namespace FastScriptReload.Editor
 
                 var originalMethods = originalType.GetAllMethods();
 
-                void HandleModifyMethod(Dictionary<string, MethodDiffInfo> methodDiffInfos, HookMethodState hookMethodState)
+                // 用于存储该类型的源方法映射
+                var typeSourceMethods = new Dictionary<string, MethodDefinition>();
+                sourceMethodMap[typeDef.FullName] = typeSourceMethods;
+
+                // 预注册方法（仅创建方法签名，不处理方法体）
+                void PreRegisterMethods(Dictionary<string, MethodDiffInfo> methodDiffInfos, HookMethodState hookMethodState)
                 {
                     foreach (var methodDef in typeDef.Methods.ToArray())
                     {
@@ -100,7 +107,9 @@ namespace FastScriptReload.Editor
 
                         var hookMethodName = methodDef.FullName;
                         
-                        var newMethodDef = ModifyMethod(mainModule, methodDef, mainModule.ImportReference(originalType));
+                        // 仅创建方法签名，不处理方法体
+                        var newMethodDef = CreateMethodSignature(mainModule, methodDef, mainModule.ImportReference(originalType));
+                        
                         if (!hookTypeInfo.ModifiedMethods.TryGetValue(hookMethodName, out var hookMethodInfo))
                         {
                             hookMethodInfo = new HookMethodInfo(newMethodDef, hookMethodState, 
@@ -113,14 +122,57 @@ namespace FastScriptReload.Editor
                         }
                         
                         typeDef.Methods.Add(newMethodDef);
+                        
+                        // 保存源方法定义，供阶段2使用
+                        typeSourceMethods[hookMethodName] = methodDef;
                     }
                 }
 
-                // 处理添加的方法
-                HandleModifyMethod(result.AddedMethods, HookMethodState.Added);
+                // 预注册添加和修改的方法
+                PreRegisterMethods(result.AddedMethods, HookMethodState.Added);
+                PreRegisterMethods(result.ModifiedMethods, HookMethodState.Modified);
+            }
+            
+            // ====== 阶段2：填充所有方法体（处理IL指令） ======
+            foreach (var typeDef in mainModule.Types)
+            {
+                if (!results.TryGetValue(typeDef.FullName, out DiffResult result))
+                {
+                    continue;
+                }
 
-                // 处理修改的方法
-                HandleModifyMethod(result.ModifiedMethods, HookMethodState.Modified);
+                if (!HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
+                {
+                    continue;
+                }
+
+                if (!sourceMethodMap.TryGetValue(typeDef.FullName, out var typeSourceMethods))
+                {
+                    continue;
+                }
+
+                // 填充方法体
+                void FillMethodBodies(Dictionary<string, MethodDiffInfo> methodDiffInfos)
+                {
+                    foreach (var (methodFullName, _) in methodDiffInfos)
+                    {
+                        if (!hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var hookMethodInfo))
+                        {
+                            continue;
+                        }
+
+                        if (!typeSourceMethods.TryGetValue(methodFullName, out var sourceMethodDef))
+                        {
+                            continue;
+                        }
+
+                        // 填充方法体（复制IL指令）
+                        FillMethodBody(mainModule, sourceMethodDef, hookMethodInfo.MethodDefinition);
+                    }
+                }
+
+                FillMethodBodies(result.AddedMethods);
+                FillMethodBodies(result.ModifiedMethods);
             }
         }
 
@@ -187,7 +239,10 @@ namespace FastScriptReload.Editor
 
         #region 方法、字段修改
 
-        private static MethodDefinition ModifyMethod(ModuleDefinition module, MethodDefinition methodDef, TypeReference originalTypeRef)
+        /// <summary>
+        /// 创建方法签名（不包含方法体）- 用于阶段1预注册
+        /// </summary>
+        private static MethodDefinition CreateMethodSignature(ModuleDefinition module, MethodDefinition methodDef, TypeReference originalTypeRef)
         {
             MethodDefinition newMethodDef = new MethodDefinition(methodDef.Name, 
                 MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, methodDef.ReturnType)
@@ -204,8 +259,10 @@ namespace FastScriptReload.Editor
                 foreach (var sourceGenericParam in methodDef.GenericParameters)
                 {
                     // 创建新的泛型参数，关联到新方法
-                    var newGenericParam = new GenericParameter(sourceGenericParam.Name, newMethodDef);
-                    newGenericParam.Attributes = sourceGenericParam.Attributes;
+                    var newGenericParam = new GenericParameter(sourceGenericParam.Name, newMethodDef)
+                    {
+                        Attributes = sourceGenericParam.Attributes
+                    };
 
                     // 复制约束（需要导入约束类型）
                     foreach (var constraint in sourceGenericParam.Constraints)
@@ -230,34 +287,52 @@ namespace FastScriptReload.Editor
             }
 
             // 添加原方法参数
-            var parameterMap = new Dictionary<ParameterDefinition, ParameterDefinition>();
             foreach (var param in methodDef.Parameters)
             {
                 var newParam = new ParameterDefinition(param.Name, param.Attributes,
                     GetOriginalType(module, param.ParameterType, genericParamMap));
                 newMethodDef.Parameters.Add(newParam);
-                
-                parameterMap[param] = newParam;
+            }
+
+            return newMethodDef;
+        }
+
+        /// <summary>
+        /// 填充方法体（复制IL指令）- 用于阶段2填充方法体
+        /// </summary>
+        private static void FillMethodBody(ModuleDefinition module, MethodDefinition sourceMethodDef, MethodDefinition targetMethodDef)
+        {
+            // 重建泛型参数映射
+            var genericParamMap = new Dictionary<GenericParameter, GenericParameter>();
+            for (int i = 0; i < sourceMethodDef.GenericParameters.Count; i++)
+            {
+                genericParamMap[sourceMethodDef.GenericParameters[i]] = targetMethodDef.GenericParameters[i];
+            }
+
+            // 重建参数映射
+            var parameterMap = new Dictionary<ParameterDefinition, ParameterDefinition>();
+            int sourceParamOffset = sourceMethodDef.IsStatic ? 0 : 1; // 目标方法添加了@this参数
+            for (int i = 0; i < sourceMethodDef.Parameters.Count; i++)
+            {
+                parameterMap[sourceMethodDef.Parameters[i]] = targetMethodDef.Parameters[i + sourceParamOffset];
             }
 
             // 复制局部变量定义
-            foreach (var variable in methodDef.Body.Variables)
+            foreach (var variable in sourceMethodDef.Body.Variables)
             {
                 var variableType = GetOriginalType(module, variable.VariableType, genericParamMap);
-                newMethodDef.Body.Variables.Add(new VariableDefinition(variableType));
+                targetMethodDef.Body.Variables.Add(new VariableDefinition(variableType));
             }
             
-            newMethodDef.Body.MaxStackSize = methodDef.Body.MaxStackSize;
+            targetMethodDef.Body.MaxStackSize = sourceMethodDef.Body.MaxStackSize;
 
             // 创建所有指令
-            var sourceInstructions = methodDef.Body.Instructions.ToList();
-            var processor = newMethodDef.Body.GetILProcessor();
+            var sourceInstructions = sourceMethodDef.Body.Instructions.ToList();
+            var processor = targetMethodDef.Body.GetILProcessor();
             for (int i = 0; i < sourceInstructions.Count; i++)
             {
                 CreateInstruction(processor, module, sourceInstructions[i], parameterMap, genericParamMap);
             }
-
-            return newMethodDef;
         }
         
         /// <summary>
@@ -702,73 +777,6 @@ namespace FastScriptReload.Editor
             }
         }
         
-        #endregion
-
-        #region 程序集引用管理
-
-        /// <summary>
-        /// 添加必要的程序集引用
-        /// </summary>
-        private static void AddRequiredReferences(AssemblyDefinition wrapperAssembly, List<HookTypeInfo> hookTypeInfos)
-        {
-            var mainModule = wrapperAssembly.MainModule;
-
-            // 收集所有原始程序集
-            var originalAssemblies = new HashSet<Assembly>();
-            foreach (var typeInfo in hookTypeInfos)
-            {
-                if (typeInfo.ExistingType?.Assembly != null)
-                {
-                    originalAssemblies.Add(typeInfo.ExistingType.Assembly);
-                }
-            }
-
-            // 为每个原始程序集添加引用及其依赖
-            foreach (var originalAssembly in originalAssemblies)
-            {
-                try
-                {
-                    if (string.IsNullOrEmpty(originalAssembly.Location))
-                    {
-                        LoggerScoped.LogDebug($"跳过动态程序集引用: {originalAssembly.FullName}");
-                        continue;
-                    }
-
-                    var originalAssemblyDef = GetOrReadAssemblyDefinition(originalAssembly.Location);
-                    if (originalAssemblyDef == null)
-                    {
-                        LoggerScoped.LogWarning($"无法读取原始程序集: {originalAssembly.Location}");
-                        continue;
-                    }
-
-                    // 添加对源程序集的引用
-                    var sourceAssemblyRef = new AssemblyNameReference(
-                        originalAssemblyDef.Name.Name,
-                        originalAssemblyDef.Name.Version);
-
-                    if (mainModule.AssemblyReferences.All(r => r.FullName != sourceAssemblyRef.FullName))
-                    {
-                        mainModule.AssemblyReferences.Add(sourceAssemblyRef);
-                        LoggerScoped.LogDebug($"添加原始程序集引用: {sourceAssemblyRef.FullName}");
-                    }
-
-                    // 添加源程序集的所有依赖引用（排除template程序集）
-                    foreach (var reference in originalAssemblyDef.MainModule.AssemblyReferences)
-                    {
-                        if (mainModule.AssemblyReferences.All(r => r.FullName != reference.FullName))
-                        {
-                            mainModule.AssemblyReferences.Add(reference);
-                            LoggerScoped.LogDebug($"添加依赖引用: {reference.FullName}");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LoggerScoped.LogWarning($"无法添加原始程序集引用: {originalAssembly.FullName}, 错误: {ex.Message}");
-                }
-            }
-        }
-
         #endregion
 
         #region 类型和方法引用处理
