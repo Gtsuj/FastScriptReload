@@ -244,11 +244,12 @@ namespace FastScriptReload.Editor
         /// </summary>
         private static MethodDefinition CreateMethodSignature(ModuleDefinition module, MethodDefinition methodDef, TypeReference originalTypeRef)
         {
-            MethodDefinition newMethodDef = new MethodDefinition(methodDef.Name, 
-                MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, methodDef.ReturnType)
-                {
-                    DeclaringType = methodDef.DeclaringType,
-                };
+            var returnType = GetOriginalType(module, methodDef.ReturnType);
+            MethodDefinition newMethodDef = new MethodDefinition(methodDef.Name,
+                MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, returnType)
+            {
+                DeclaringType = methodDef.DeclaringType,
+            };
 
             newMethodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
 
@@ -424,7 +425,7 @@ namespace FastScriptReload.Editor
             if (originalMethodRef == null)
             {
                 LoggerScoped.LogWarning($"从原程序集获取方法引用失败: {methodRef.FullName}");
-                originalMethodRef = methodRef;
+                originalMethodRef = module.ImportReference(methodRef);
             }
 
             processor.Append(Instruction.Create(sourceInst.OpCode, originalMethodRef));
@@ -793,14 +794,22 @@ namespace FastScriptReload.Editor
             }
 
             if (operandTypeRef is GenericParameter operandGenericParameter &&
-                genericParamMap != null &&
-                genericParamMap.TryGetValue(operandGenericParameter, out var genericParameter))
+                genericParamMap != null && genericParamMap.TryGetValue(operandGenericParameter, out var genericParameter))
             {
                 return genericParameter;
             }
 
-            if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(operandTypeRef.FullName,
-                    out var originalType))
+            if (operandTypeRef.IsGenericInstance)
+            {
+                var arguments = MonoCecilHelper.GetGenericArguments(operandTypeRef).ToArray();
+                for (int i = 0; i < arguments.Length; i++)
+                {
+                    arguments[i] = GetOriginalType(module, arguments[i], genericParamMap);
+                }
+                return MonoCecilHelper.CreateGenericInstanceType(operandTypeRef.GetElementType(), arguments);
+            }
+
+            if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(operandTypeRef.FullName, out var originalType))
             {
                 return module.ImportReference(originalType);
             }
@@ -815,23 +824,29 @@ namespace FastScriptReload.Editor
         {
             try
             {
-                var declaringTypeFullName = methodRef.DeclaringType.FullName;
+                var declaringTypeFullName = methodRef.DeclaringType.IsNested
+                    ? methodRef.DeclaringType.DeclaringType.FullName
+                    : methodRef.DeclaringType.FullName;
 
-                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(declaringTypeFullName,
-                        out var originalType) ||
-                    string.IsNullOrEmpty(originalType.Assembly?.Location))
+                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(declaringTypeFullName, out var originalType))
                 {
-                    return null;
+                    return module.ImportReference(methodRef);
                 }
 
                 // 作用域与原类型一致
-                if (originalType.Assembly.GetName().Name.Equals(methodRef?.DeclaringType?.Scope?.Name))
+                if (originalType.Assembly.GetName().Name.Equals(methodRef.DeclaringType.Scope?.Name))
                 {
                     return module.ImportReference(methodRef);
                 }
 
                 var originalAssemblyDef = GetOrReadAssemblyDefinition(originalType.Assembly.Location);
                 var originalTypeDef = originalAssemblyDef?.MainModule.Types.FirstOrDefault(t => t.FullName == declaringTypeFullName);
+                
+                if (methodRef.DeclaringType.IsNested)
+                {
+                    originalTypeDef = originalTypeDef?.NestedTypes.FirstOrDefault(definition => definition.FullName.Equals(methodRef.DeclaringType.FullName));
+                }
+                
                 if (originalTypeDef == null)
                 {
                     return null;

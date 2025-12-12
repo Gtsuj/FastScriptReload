@@ -19,9 +19,10 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 使用 Roslyn 编译 C# 文件到一个程序集（支持单个或多个文件）
         /// </summary>
+        /// <param name="assemblyName">改动文件对应的AssemblyName</param>
         /// <param name="csFilePaths">要编译的 C# 文件路径列表</param>
         /// <returns>编译结果，包含编译后的程序集内存流和诊断信息</returns>
-        public static Dictionary<string, DiffResult> CompileCsFiles(List<string> csFilePaths)
+        public static Dictionary<string, DiffResult> CompileCsFiles(string assemblyName, List<string> csFilePaths)
         {
             try
             {
@@ -31,9 +32,9 @@ namespace FastScriptReload.Editor
 
                 // 创建编译（合并所有文件到一个程序集）
                 var compilation = CSharpCompilation.Create(
-                    assemblyName: Guid.NewGuid().ToString("N"),
+                    assemblyName: $"{assemblyName}_{Guid.NewGuid()}",
                     syntaxTrees: syntaxTrees.Values,
-                    references: GetOrResolveAssemblyReferences(),
+                    references: GetAssemblyDependencies(assemblyName),
                     options: new CSharpCompilationOptions(
                         OutputKind.DynamicallyLinkedLibrary,
                         optimizationLevel: OptimizationLevel.Debug,
