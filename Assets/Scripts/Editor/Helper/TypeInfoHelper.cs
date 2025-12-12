@@ -3,6 +3,8 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
+using System.Threading;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -24,7 +26,7 @@ namespace FastScriptReload.Editor
         public static readonly ConcurrentDictionary<string, TypeInfo> TypeInfoCache = new();
 
         /// <summary>
-        /// 初始化并收集所有类型信息
+        /// 初始化并收集所有类型信息（同步版本，保持向后兼容）
         /// </summary>
         public static void Initialized()
         {
@@ -33,9 +35,9 @@ namespace FastScriptReload.Editor
                 return;
             }
 
-            if (_isInitialized) return;
+            // if (_isInitialized) return;
             
-            CollectAllTypeInfo();
+            CollectAllTypeInfoAsync();
 
             _isInitialized = true;
         }
@@ -61,9 +63,9 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 更新多个文件的类型信息
         /// </summary>
-        public static void UpdateTypeInfoForFiles(Dictionary<string, SyntaxTree> filePaths)
+        public static void UpdateTypeInfoForFiles(Dictionary<string, SyntaxTree> syntaxTrees)
         {
-            foreach (var (filePath, syntaxTree) in filePaths)
+            foreach (var (filePath, syntaxTree) in syntaxTrees)
             {
                 UpdateTypeInfoForFile(filePath, syntaxTree);
             }
@@ -115,7 +117,44 @@ namespace FastScriptReload.Editor
         }        
         
         /// <summary>
-        /// 收集所有类型信息
+        /// 收集所有类型信息（并行处理版本，阻塞主线程直到完成）
+        /// </summary>
+        private static void CollectAllTypeInfoAsync()
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            var filePaths = Directory.GetFiles(Application.dataPath, "*.cs", SearchOption.AllDirectories);
+            
+            var syntaxTrees = new ConcurrentBag<SyntaxTree>();
+            
+            Parallel.ForEach(filePaths, filePath =>
+            {
+                SaveFileSnapshot(filePath, out var fileSnapshot);
+                if (fileSnapshot != null)
+                {
+                    syntaxTrees.Add(fileSnapshot.SyntaxTree);
+                }
+            });
+
+            var syntaxTreeList = syntaxTrees.ToList();
+
+            _compilation = CSharpCompilation.Create(
+                "TypeInfoCollection", syntaxTreeList, 
+                ReloadHelper.GetOrResolveAssemblyReferences(),
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+            
+            Parallel.ForEach(syntaxTreeList, tree =>
+            {
+                SemanticModel semanticModel = _compilation.GetSemanticModel(tree);
+                CollectTypeInfoFromFile(semanticModel);
+            });
+
+            stopwatch.Stop();
+            LoggerScoped.Log($"类型信息收集完成，耗时: {stopwatch.ElapsedMilliseconds}ms, 收集类型数: {TypeInfoCache.Count}");
+        }
+
+        /// <summary>
+        /// 收集所有类型信息（同步版本，保持向后兼容）
         /// </summary>
         private static void CollectAllTypeInfo()
         {
@@ -165,7 +204,7 @@ namespace FastScriptReload.Editor
                     SnapshotTime = DateTime.UtcNow
                 };
 
-                _fileSnapshots.TryAdd(filePath, fileSnapshot);
+                _fileSnapshots[filePath] = fileSnapshot;
 
                 LoggerScoped.LogDebug($"已保存文件快照: {filePath}");
             }
@@ -246,14 +285,18 @@ namespace FastScriptReload.Editor
             }
         }
 
-
+        // 使用线程本地存储来避免多线程冲突
+        private static readonly ThreadLocal<GenericMethodCallWalker> _collector = new (() => new GenericMethodCallWalker());
+        
         private static void CollectUsedGenericMethods(TypeInfo typeInfo, TypeDeclarationSyntax typeDecl, SemanticModel semanticModel)
         {
             var filePath = semanticModel.SyntaxTree.FilePath;
-            var walker = new GenericMethodCallWalker(semanticModel);
-            walker.Visit(typeDecl);
+            // var collector = _collector.Value; // 获取当前线程的 collector 实例
+            var collector = new GenericMethodCallWalker();
+            collector.SetSemanticModel(semanticModel);
+            collector.Analyze(typeDecl);
 
-            var genericMethodCalls = walker.GetGenericMethodCalls();
+            var genericMethodCalls = collector.GetGenericMethodCalls();
             foreach (var kvp in genericMethodCalls)
             {
                 if (!typeInfo.UsedGenericMethods.TryGetValue(kvp.Key, out var existingCallers))

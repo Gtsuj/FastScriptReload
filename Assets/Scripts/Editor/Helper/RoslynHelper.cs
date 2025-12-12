@@ -82,9 +82,17 @@ namespace FastScriptReload.Editor
             }
 
             var namespaceName = (namespaceDecl as BaseNamespaceDeclarationSyntax)?.Name.ToString() ?? string.Empty;
-            var typeName = string.Join(".", parts);
-
-            return string.IsNullOrEmpty(namespaceName) ? typeName : $"{namespaceName}.{typeName}";
+            
+            if (string.IsNullOrEmpty(namespaceName))
+            {
+                return string.Join(".", parts);
+            }
+            
+            var builder = new StringBuilder(namespaceName.Length + parts.Count * 20);
+            builder.Append(namespaceName);
+            builder.Append('.');
+            builder.Append(string.Join(".", parts));
+            return builder.ToString();
         }
 
         /// <summary>
@@ -93,8 +101,24 @@ namespace FastScriptReload.Editor
         public static string FullName(this MethodDeclarationSyntax method)
         {
             var methodName = method.Identifier.ValueText;
-            var parameters = string.Join(",", method.ParameterList.Parameters.Select(p => p.Type?.ToString() ?? ""));
-            return $"{method.ReturnType.ToFullString()} {methodName}({parameters})";
+            var returnTypeStr = method.ReturnType.ToFullString();
+            var paramList = method.ParameterList.Parameters;
+            
+            var builder = new StringBuilder(returnTypeStr.Length + methodName.Length + paramList.Count * 20 + 10);
+            builder.Append(returnTypeStr);
+            builder.Append(' ');
+            builder.Append(methodName);
+            builder.Append('(');
+            
+            for (int i = 0; i < paramList.Count; i++)
+            {
+                if (i > 0)
+                    builder.Append(',');
+                builder.Append(paramList[i].Type?.ToString() ?? "");
+            }
+            
+            builder.Append(')');
+            return builder.ToString();
         }
         
         /// <summary>
@@ -108,27 +132,49 @@ namespace FastScriptReload.Editor
                 return method.FullName();
             }
 
-            var typeName = methodSymbol.ContainingType.ToDisplayString(TYPE_FORMAT);
-            var methodName = methodSymbol.ToDisplayString(METHOD_FORMAT);
+            return methodSymbol.FullName();
+        }
 
-            // 处理引用返回类型（ref T）
-            string returnTypePrefix = "";
-            TypeSyntax typeToAnalyze = method.ReturnType;
-            
-            if (method.ReturnType is RefTypeSyntax refType)
+        public static string FullName(this IMethodSymbol methodSymbol)
+        {
+            var typeName = methodSymbol.ContainingType.ToDisplayString(TYPE_FORMAT);
+            var methodName = methodSymbol.Name;
+
+            // 处理引用返回类型
+            var typeToAnalyze = methodSymbol.ReturnType;
+            var returnType = typeToAnalyze.ToDisplayString(TYPE_FORMAT);
+
+            // 估算容量：返回类型 + 类型名 + 方法名 + 参数（每个约20字符）+ 固定字符
+            var paramCount = methodSymbol.Parameters.Length;
+            var estimatedCapacity = returnType.Length + typeName.Length + methodName.Length + paramCount * 20 + 20;
+            var builder = new StringBuilder(estimatedCapacity);
+
+            // 组合返回类型
+            builder.Append(returnType);
+            builder.Append(' ');
+            builder.Append(typeName);
+            builder.Append("::");
+            builder.Append(methodName);
+            builder.Append('(');
+
+            for (int i = 0; i < paramCount; i++)
             {
-                returnTypePrefix = "ref ";
-                typeToAnalyze = refType.Type;
+                if (i > 0)
+                    builder.Append(',');
+                
+                var param = methodSymbol.Parameters[i];
+                if (param.Type is ITypeParameterSymbol paramTypeParam)
+                {
+                    builder.Append(paramTypeParam.Name);
+                }
+                else
+                {
+                    builder.Append(param.Type.ToDisplayString(TYPE_FORMAT));
+                }
             }
 
-            // 获取返回类型的完整名称
-            var typeInfo = semanticModel.GetTypeInfo(typeToAnalyze);
-            string returnType = typeInfo.Type?.ToDisplayString(TYPE_FORMAT);
-            
-            // 组合返回类型（包含 ref 前缀）
-            var fullReturnType = returnTypePrefix + returnType;
-            
-            return $"{fullReturnType} {typeName}::{methodName}";
+            builder.Append(')');
+            return builder.ToString();
         }
         
         /// <summary>
