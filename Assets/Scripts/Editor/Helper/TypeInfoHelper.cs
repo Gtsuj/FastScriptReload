@@ -20,10 +20,9 @@ namespace FastScriptReload.Editor
     public static class TypeInfoHelper
     {
         private static bool _isInitialized;
-        private static readonly ConcurrentDictionary<string, FileSnapshot> _fileSnapshots = new();
         private static CSharpCompilation _compilation;
-        
         public static readonly ConcurrentDictionary<string, TypeInfo> TypeInfoCache = new();
+        private static readonly ConcurrentDictionary<string, FileSnapshot> _fileSnapshots = new();
 
         /// <summary>
         /// 初始化并收集所有类型信息（同步版本，保持向后兼容）

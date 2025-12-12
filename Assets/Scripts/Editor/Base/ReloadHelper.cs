@@ -8,7 +8,9 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Mono.Cecil;
 using UnityEditor;
+using UnityEditor.Compilation;
 using UnityEngine;
+using Assembly = System.Reflection.Assembly;
 
 namespace FastScriptReload.Editor
 {
@@ -45,6 +47,16 @@ namespace FastScriptReload.Editor
         /// 程序集引用缓存（避免重复遍历AppDomain）
         /// </summary>
         private static List<MetadataReference> _assemblyReferencesCache;
+
+        /// <summary>
+        /// 文件路径到程序集的映射缓存（用于确定文件所属程序集）
+        /// </summary>
+        private static Dictionary<string, UnityEditor.Compilation.Assembly> _fileToAssemblyCache = new();
+        
+        /// <summary>
+        /// 程序集名称到程序集的映射缓存（用于确定程序集名称对应的程序集）
+        /// </summary>
+        private static Dictionary<string, UnityEditor.Compilation.Assembly> _nameToAssemblyCache = new();
         
         /// <summary>
         /// 初始化
@@ -56,6 +68,8 @@ namespace FastScriptReload.Editor
             {
                 return;
             }
+
+            InitializeFileToAssemblyCache();
 
             _ = RoslynHelper.PARSE_OPTIONS;
             // 收集所有类型信息
@@ -141,12 +155,6 @@ namespace FastScriptReload.Editor
                     continue;
                 }
 
-                if (assembly.GetName().Name.Contains("Mono.Cecil")
-                    || assembly.GetName().Name.Contains("Unity.Cecil"))
-                {
-                    continue;
-                }
-
                 if (string.IsNullOrEmpty(assembly.Location))
                 {
                     continue;
@@ -159,6 +167,71 @@ namespace FastScriptReload.Editor
             return references;
         }
 
+        #region 程序集识别和分组
+
+        /// <summary>
+        /// 初始化文件到程序集的映射缓存
+        /// </summary>
+        private static void InitializeFileToAssemblyCache()
+        {
+            // 获取所有程序集（包括 Editor 和 Player）
+            var allAssemblies = CompilationPipeline.GetAssemblies();
+            foreach (var assembly in allAssemblies)
+            {
+                foreach (var sourceFile in assembly.sourceFiles)
+                {
+                    var path = Path.GetFullPath(Path.Combine(Application.dataPath, "..", sourceFile));
+                    _fileToAssemblyCache[path] = assembly;
+                }
+
+                _nameToAssemblyCache[assembly.name] = assembly;
+            }
+        }
+
+        /// <summary>
+        /// 根据文件路径获取所属程序集名称
+        /// </summary>
+        /// <param name="filePath">文件路径</param>
+        /// <returns>程序集名称，如果找不到则返回 Assembly-CSharp</returns>
+        public static string GetAssemblyNameForFile(string filePath)
+        {
+            if (_fileToAssemblyCache.TryGetValue(filePath, out var assembly))
+            {
+                return assembly.name;
+            }
+            
+            LoggerScoped.LogWarning($"无法确定文件 {Path.GetFileName(filePath)} 所属的程序集，默认使用 Assembly-CSharp");
+
+            return null;
+        }
+
+        /// <summary>
+        /// 根据程序集名称获取程序集的依赖
+        /// </summary>
+        /// <param name="assemblyName">程序集名称</param>
+        /// <returns>程序集的依赖</returns>
+        public static List<MetadataReference> GetAssemblyDependencies(string assemblyName)
+        {
+            List<MetadataReference> references = new ();
+            if (_nameToAssemblyCache.TryGetValue(assemblyName, out var assembly))
+            {
+                foreach (var assemblyReference in assembly.assemblyReferences)
+                {
+                    references.Add(MetadataReference.CreateFromFile(assemblyReference.outputPath));
+                }
+                
+                foreach (var compiledAssemblyReference in assembly.compiledAssemblyReferences)
+                {
+                    references.Add(MetadataReference.CreateFromFile(compiledAssemblyReference));
+                }
+                
+                references.Add(MetadataReference.CreateFromFile(assembly.outputPath));
+            }
+
+            return references;
+        }
+        #endregion
+
         /// <summary>
         /// 清除所有缓存（在一次Reload流程完成后调用）
         /// </summary>
@@ -169,7 +242,7 @@ namespace FastScriptReload.Editor
             {
                 assemblyDef?.Dispose();
             }
-            
+
             _assemblyDefinitionCache.Clear();
             _assemblyDefinition?.Dispose();
             _assemblyDefinition = null;

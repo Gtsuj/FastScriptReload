@@ -562,62 +562,19 @@ namespace FastScriptReload.Editor
 
                 var unityMainThreadDispatcher = UnityMainThreadDispatcher.Instance.EnsureInitialized(); //need to pass that in, resolving on other than main thread will cause exception
                 Task.Run(() =>
-                {
-                    List<string> sourceCodeFilesWithUniqueChangesAwaitingHotReload = null;
+                { 
+                    // 按程序集分组
+                    var filesByAssembly = changesAwaitingHotReload
+                        .GroupBy(e => ReloadHelper.GetAssemblyNameForFile(e.FullFileName))
+                        .ToDictionary(g => g.Key, g => g.GroupBy(e => e.FullFileName)
+                            .Select(e => e.First().FullFileName).ToList());
+
                     try
                     {
-                        sourceCodeFilesWithUniqueChangesAwaitingHotReload = changesAwaitingHotReload
-                            .GroupBy(e => e.FullFileName)
-                            .Select(e => e.First().FullFileName).ToList();
-
-                        // 编译改动的C#文件
-                        var diffResults = ReloadHelper.CompileCsFiles(sourceCodeFilesWithUniqueChangesAwaitingHotReload);
-                        if (diffResults == null)
+                        foreach (var pair in filesByAssembly)
                         {
-                            changesAwaitingHotReload.ForEach(c =>
-                            {
-                                c.ErrorOn = DateTime.UtcNow;
-                            });
-                            return;
+                            ReloadChangedFiles(changesAwaitingHotReload, pair.Key, pair.Value);
                         }
-
-                        // 删除冗余部分，将改动的方法转换为静态方法
-                        var assemblyPath = ReloadHelper.ModifyCompileAssembly(diffResults);
-                        
-                        changesAwaitingHotReload.ForEach(c =>
-                        {
-                            c.FileCompiledOn = DateTime.UtcNow;
-                            c.AssemblyNameCompiledIn = assemblyPath;
-                        });
-                        
-                        // 应用热重载Hook
-                        ReloadHelper.ApplyHooks(diffResults);
-
-                        changesAwaitingHotReload.ForEach(c =>
-                        {
-                            c.HotSwappedOn = DateTime.UtcNow;
-                            c.IsBeingProcessed = false;
-                        }); //TODO: technically not all were hot swapped at same time
-
-                        _hotReloadPerformedCount++;
-
-                        SafeInvoke(HotReloadSucceeded, changesAwaitingHotReload);
-                    }
-                    catch (Exception ex)
-                    {
-                        if (ex is SourceCodeHasErrorsException e)
-                            LoggerScoped.LogError(e.Message + Environment.NewLine);
-                        else
-                            LoggerScoped.LogError($"Error when updating files: '{(sourceCodeFilesWithUniqueChangesAwaitingHotReload != null ? string.Join(",", sourceCodeFilesWithUniqueChangesAwaitingHotReload.Select(fn => new FileInfo(fn).Name)) : "unknown")}', {ex}");
-                        
-                        changesAwaitingHotReload.ForEach(c =>
-                        {
-                            c.ErrorOn = DateTime.UtcNow;
-                            c.ErrorText = ex.Message;
-                            c.SourceCodeCombinedFilePath = (ex as HotReloadCompilationException)?.SourceCodeCombinedFileCreated;
-                        });
-
-                        SafeInvoke(HotReloadFailed, changesAwaitingHotReload);
                     }
                     finally
                     {
@@ -627,6 +584,58 @@ namespace FastScriptReload.Editor
             }
 
             _lastTimeChangeBatchRun = DateTime.UtcNow;
+        }
+
+        private void ReloadChangedFiles(List<DynamicFileHotReloadState> changesAwaitingHotReload, string assemblyName, List<string> files)
+        {
+            try
+            {
+                // 编译改动的C#文件
+                var diffResults = ReloadHelper.CompileCsFiles(assemblyName, files);
+                if (diffResults == null)
+                {
+                    changesAwaitingHotReload.ForEach(c => c.ErrorOn = DateTime.UtcNow);
+                    return;
+                }
+
+                // 删除冗余部分，将改动的方法转换为静态方法
+                var assemblyPath = ReloadHelper.ModifyCompileAssembly(diffResults);
+
+                changesAwaitingHotReload.ForEach(c =>
+                {
+                    c.FileCompiledOn = DateTime.UtcNow;
+                    c.AssemblyNameCompiledIn = assemblyPath;
+                });
+
+                // 应用热重载Hook
+                ReloadHelper.ApplyHooks(diffResults);
+
+                changesAwaitingHotReload.ForEach(c =>
+                {
+                    c.HotSwappedOn = DateTime.UtcNow;
+                    c.IsBeingProcessed = false;
+                }); //TODO: technically not all were hot swapped at same time
+
+                _hotReloadPerformedCount++;
+
+                SafeInvoke(HotReloadSucceeded, changesAwaitingHotReload);
+            }
+            catch (Exception ex)
+            {
+                if (ex is SourceCodeHasErrorsException e)
+                    LoggerScoped.LogError(e.Message + Environment.NewLine);
+                else
+                    LoggerScoped.LogError($"Error when updating files: '{(files != null ? string.Join(",", files.Select(fn => new FileInfo(fn).Name)) : "unknown")}', {ex}");
+
+                changesAwaitingHotReload.ForEach(c =>
+                {
+                    c.ErrorOn = DateTime.UtcNow;
+                    c.ErrorText = ex.Message;
+                    c.SourceCodeCombinedFilePath = (ex as HotReloadCompilationException)?.SourceCodeCombinedFileCreated;
+                });
+
+                SafeInvoke(HotReloadFailed, changesAwaitingHotReload);
+            }
         }
 
         private void SafeInvoke(Action<List<DynamicFileHotReloadState>> ev, List<DynamicFileHotReloadState> changesAwaitingHotReload)
