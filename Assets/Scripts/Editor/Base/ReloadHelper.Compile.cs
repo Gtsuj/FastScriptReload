@@ -8,6 +8,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Mono.Cecil;
+using Mono.Cecil.Pdb;
 
 namespace FastScriptReload.Editor
 {
@@ -71,7 +72,7 @@ namespace FastScriptReload.Editor
                 if (emitResult.Success)
                 {
                     ms.Seek(0, SeekOrigin.Begin);
-                    _assemblyDefinition = AssemblyDefinition.ReadAssembly(ms, new ReaderParameters { ReadWrite = true, InMemory = true });
+                    _assemblyDefinition = AssemblyDefinition.ReadAssembly(ms, READER_PARAMETERS);
 
                     return typeDiffs;
                 }

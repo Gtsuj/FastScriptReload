@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Text;
 using HarmonyLib;
 
 namespace FastScriptReload.Editor
@@ -45,17 +44,13 @@ namespace FastScriptReload.Editor
         }
 #endif
 
-        public static MethodBase[] GetAllMethods(this Type type)
+        public static Dictionary<string, MethodBase> GetAllMethods(this Type type)
         {
-            var flags = BindingFlags.Public | BindingFlags.NonPublic |
-                BindingFlags.Static | BindingFlags.Instance |
-                BindingFlags.DeclaredOnly;
-            // 找出修改的方法
-            var methods = type.GetConstructors(flags)
+            // 找出修改的方法，并使用LINQ直接转换为字典
+            return type.GetConstructors(AccessTools.allDeclared)
                 .Cast<MethodBase>()
-                .Concat(type.GetMethods(flags)).ToArray();
-
-            return methods;
+                .Concat(type.GetMethods(AccessTools.allDeclared))
+                .ToDictionary(m => m.FullName(), m => m);
         }
 
         //see _MonoMethod struct in class-internals.h

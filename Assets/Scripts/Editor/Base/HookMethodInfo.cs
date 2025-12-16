@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Reflection;
 using Mono.Cecil;
 
@@ -41,5 +41,10 @@ namespace FastScriptReload.Editor
         /// 原有方法
         /// </summary>
         public MethodBase OriginalMethod { get; set; }
+
+        /// <summary>
+        /// 源方法的Mono.Cecil定义（用于IL修改）
+        /// </summary>
+        public MethodDefinition SourceMethodDefinition { get; set; }
     }
 }

@@ -200,7 +200,7 @@ namespace FastScriptReload.Editor
                     var parameterDefinition = parameters[index];
                     if (index > 0)
                         builder.Append(",");
-                    builder.Append(parameterDefinition.ParameterType.FullName);
+                    builder.Append(parameterDefinition.ParameterType.FullName ?? parameterDefinition.ParameterType.Name);
                 }
             }
 
