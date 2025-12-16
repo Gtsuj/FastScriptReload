@@ -57,13 +57,12 @@ namespace FastScriptReload.Editor
                         continue;
                     }
 
-                    if (modifiedMethod.MethodDefinition.IsGenericInstance)
+                    if (modifiedMethod.MethodDefinition.HasGenericParameters)
                     {
                         continue;
                     }
 
-                    var wrapperMethod = wrapperMethods.FirstOrDefault(m => m.FullName() == modifiedMethod.WrapperMethodName);
-                    if (wrapperMethod == null)
+                    if (!wrapperMethods.TryGetValue(modifiedMethod.WrapperMethodName, out var wrapperMethod))
                     {
                         continue;
                     }

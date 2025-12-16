@@ -2,11 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using FastScriptReload.Runtime;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Mono.Cecil.Pdb;
 using Code = Mono.Cecil.Cil.Code;
 using MethodAttributes = Mono.Cecil.MethodAttributes;
 using MethodImplAttributes = Mono.Cecil.MethodImplAttributes;
@@ -23,6 +23,7 @@ namespace FastScriptReload.Editor
 
         public static string ModifyCompileAssembly(Dictionary<string, DiffResult> results)
         {
+            // 修改程序集
             HandleAssemblyType(results);
 
             // 清理程序集
@@ -49,7 +50,7 @@ namespace FastScriptReload.Editor
             return filePath;
         }
 
-        private static void HandleAssemblyType(Dictionary<string, DiffResult> results)
+        private static void HandleAssemblyType(Dictionary<string, DiffResult> diffResults)
         {
             var mainModule = _assemblyDefinition.MainModule;
             
@@ -59,7 +60,7 @@ namespace FastScriptReload.Editor
             // ====== 阶段1：预注册所有方法签名（仅创建签名，不处理方法体） ======
             foreach (var typeDef in mainModule.Types)
             {
-                if (!results.TryGetValue(typeDef.FullName, out DiffResult result))
+                if (!diffResults.TryGetValue(typeDef.FullName, out DiffResult result))
                 {
                     continue;
                 }
@@ -68,7 +69,7 @@ namespace FastScriptReload.Editor
                 {
                     continue;
                 }
-                
+
                 if (!HookTypeInfoCache.TryGetValue(originalType.FullName!, out var hookTypeInfo))
                 {
                     hookTypeInfo = new HookTypeInfo
@@ -108,12 +109,12 @@ namespace FastScriptReload.Editor
                         var hookMethodName = methodDef.FullName;
                         
                         // 仅创建方法签名，不处理方法体
-                        var newMethodDef = CreateMethodSignature(mainModule, methodDef, mainModule.ImportReference(originalType));
+                        var newMethodDef = CreateMethodSignature(methodDef, mainModule.ImportReference(originalType));
                         
                         if (!hookTypeInfo.ModifiedMethods.TryGetValue(hookMethodName, out var hookMethodInfo))
                         {
-                            hookMethodInfo = new HookMethodInfo(newMethodDef, hookMethodState, 
-                                originalMethods.FirstOrDefault(info => info.FullName().Equals(hookMethodName)));
+                            
+                            hookMethodInfo = new HookMethodInfo(newMethodDef, hookMethodState, originalMethods.GetValueOrDefault(hookMethodName));
                             hookTypeInfo.ModifiedMethods.Add(hookMethodName, hookMethodInfo);
                         }
                         else
@@ -123,7 +124,7 @@ namespace FastScriptReload.Editor
                         
                         typeDef.Methods.Add(newMethodDef);
                         
-                        // 保存源方法定义，供阶段2使用
+                        // 保存源方法定义
                         typeSourceMethods[hookMethodName] = methodDef;
                     }
                 }
@@ -136,7 +137,7 @@ namespace FastScriptReload.Editor
             // ====== 阶段2：填充所有方法体（处理IL指令） ======
             foreach (var typeDef in mainModule.Types)
             {
-                if (!results.TryGetValue(typeDef.FullName, out DiffResult result))
+                if (!diffResults.TryGetValue(typeDef.FullName, out DiffResult result))
                 {
                     continue;
                 }
@@ -167,7 +168,7 @@ namespace FastScriptReload.Editor
                         }
 
                         // 填充方法体（复制IL指令）
-                        FillMethodBody(mainModule, sourceMethodDef, hookMethodInfo.MethodDefinition);
+                        FillMethodBody(sourceMethodDef, hookMethodInfo.MethodDefinition);
                     }
                 }
 
@@ -240,11 +241,11 @@ namespace FastScriptReload.Editor
         #region 方法、字段修改
 
         /// <summary>
-        /// 创建方法签名（不包含方法体）- 用于阶段1预注册
+        /// 创建方法签名（不包含方法体）
         /// </summary>
-        private static MethodDefinition CreateMethodSignature(ModuleDefinition module, MethodDefinition methodDef, TypeReference originalTypeRef)
+        private static MethodDefinition CreateMethodSignature(MethodDefinition methodDef, TypeReference originalTypeRef)
         {
-            var returnType = GetOriginalType(module, methodDef.ReturnType);
+            var returnType = GetOriginalType(methodDef.ReturnType);
             MethodDefinition newMethodDef = new MethodDefinition(methodDef.Name,
                 MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, returnType)
             {
@@ -254,45 +255,32 @@ namespace FastScriptReload.Editor
             newMethodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
 
             // 泛型参数处理
-            var genericParamMap = new Dictionary<GenericParameter, GenericParameter>();
             if (methodDef.HasGenericParameters)
             {
                 foreach (var sourceGenericParam in methodDef.GenericParameters)
                 {
-                    // 创建新的泛型参数，关联到新方法
-                    var newGenericParam = new GenericParameter(sourceGenericParam.Name, newMethodDef)
-                    {
-                        Attributes = sourceGenericParam.Attributes
-                    };
-
-                    // 复制约束（需要导入约束类型）
+                    // 约束类型重定向
                     foreach (var constraint in sourceGenericParam.Constraints)
                     {
-                        var constraintType = GetOriginalType(module, constraint.ConstraintType);
-                        newGenericParam.Constraints.Add(new GenericParameterConstraint(constraintType));
+                        constraint.ConstraintType = GetOriginalType(constraint.ConstraintType);
                     }
 
-                    newMethodDef.GenericParameters.Add(newGenericParam);
-                    genericParamMap[sourceGenericParam] = newGenericParam;
+                    newMethodDef.GenericParameters.Add(sourceGenericParam);
                 }
             }
 
-            // 设置返回值
-            newMethodDef.ReturnType = GetOriginalType(module, methodDef.ReturnType, genericParamMap);
-
+            newMethodDef.Parameters.Clear();
             // 将@this参数加入到方法参数列表的头部
             if (!methodDef.IsStatic)
             {
-                newMethodDef.Parameters.Insert(0,
-                    new ParameterDefinition("@this", ParameterAttributes.None, originalTypeRef));
+                newMethodDef.Parameters.Add(new ParameterDefinition("@this", ParameterAttributes.None, originalTypeRef));
             }
 
             // 添加原方法参数
             foreach (var param in methodDef.Parameters)
             {
-                var newParam = new ParameterDefinition(param.Name, param.Attributes,
-                    GetOriginalType(module, param.ParameterType, genericParamMap));
-                newMethodDef.Parameters.Add(newParam);
+                param.ParameterType = GetOriginalType(param.ParameterType);
+                newMethodDef.Parameters.Add(param);
             }
 
             return newMethodDef;
@@ -301,82 +289,84 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 填充方法体（复制IL指令）- 用于阶段2填充方法体
         /// </summary>
-        private static void FillMethodBody(ModuleDefinition module, MethodDefinition sourceMethodDef, MethodDefinition targetMethodDef)
+        private static void FillMethodBody(MethodDefinition sourceMethodDef, MethodDefinition targetMethodDef)
         {
-            // 重建泛型参数映射
-            var genericParamMap = new Dictionary<GenericParameter, GenericParameter>();
-            for (int i = 0; i < sourceMethodDef.GenericParameters.Count; i++)
-            {
-                genericParamMap[sourceMethodDef.GenericParameters[i]] = targetMethodDef.GenericParameters[i];
-            }
+            var module = sourceMethodDef.Module;
 
-            // 重建参数映射
-            var parameterMap = new Dictionary<ParameterDefinition, ParameterDefinition>();
-            int sourceParamOffset = sourceMethodDef.IsStatic ? 0 : 1; // 目标方法添加了@this参数
-            for (int i = 0; i < sourceMethodDef.Parameters.Count; i++)
-            {
-                parameterMap[sourceMethodDef.Parameters[i]] = targetMethodDef.Parameters[i + sourceParamOffset];
-            }
+            targetMethodDef.Body.MaxStackSize = sourceMethodDef.Body.MaxStackSize;
 
-            // 复制局部变量定义
+            // 添加局部变量定义
             foreach (var variable in sourceMethodDef.Body.Variables)
             {
-                var variableType = GetOriginalType(module, variable.VariableType, genericParamMap);
-                targetMethodDef.Body.Variables.Add(new VariableDefinition(variableType));
+                variable.VariableType = GetOriginalType(variable.VariableType);
+                targetMethodDef.Body.Variables.Add(variable);
             }
-            
-            targetMethodDef.Body.MaxStackSize = sourceMethodDef.Body.MaxStackSize;
 
             // 创建所有指令
             var sourceInstructions = sourceMethodDef.Body.Instructions.ToList();
             var processor = targetMethodDef.Body.GetILProcessor();
+
+            // 建立指令映射，用于异常处理器
+            var instructionMap = new Dictionary<Instruction, Instruction>();
+
             for (int i = 0; i < sourceInstructions.Count; i++)
             {
-                CreateInstruction(processor, module, sourceInstructions[i], parameterMap, genericParamMap);
+                var sourceInst = sourceInstructions[i];
+                var newInst = CreateInstruction(module, processor, sourceInst);
+                instructionMap[sourceInst] = newInst;
+            }
+
+            // 复制异常处理器
+            foreach (var handler in sourceMethodDef.Body.ExceptionHandlers)
+            {
+                var newHandler = new ExceptionHandler(handler.HandlerType)
+                {
+                    TryStart = handler.TryStart != null ? instructionMap[handler.TryStart] : null,
+                    TryEnd = handler.TryEnd != null ? instructionMap[handler.TryEnd] : null,
+                    HandlerStart = handler.HandlerStart != null ? instructionMap[handler.HandlerStart] : null,
+                    HandlerEnd = handler.HandlerEnd != null ? instructionMap[handler.HandlerEnd] : null,
+                    CatchType = handler.CatchType != null ? GetOriginalType(handler.CatchType) : null,
+                    FilterStart = handler.FilterStart != null ? instructionMap[handler.FilterStart] : null
+                };
+                targetMethodDef.Body.ExceptionHandlers.Add(newHandler);
             }
         }
         
         /// <summary>
         /// 创建指令
         /// </summary>
-        private static void CreateInstruction(ILProcessor processor, ModuleDefinition module, Instruction sourceInst,
-            Dictionary<ParameterDefinition, ParameterDefinition> parameterMap, Dictionary<GenericParameter, GenericParameter> genericParamMap)
+        private static Instruction CreateInstruction(ModuleDefinition module, ILProcessor processor, Instruction sourceInst)
         {
+            Instruction newInst = null;
+
             if (sourceInst.Operand == null)
             {
-                processor.Append(Instruction.Create(sourceInst.OpCode));
-                return;
+                newInst = Instruction.Create(sourceInst.OpCode);
+                processor.Append(newInst);
+                return newInst;
             }
 
             switch (sourceInst.Operand)
             {
                 case Instruction targetInst:
-                    processor.Append(Instruction.Create(sourceInst.OpCode, targetInst));
-                    return;
-
+                    newInst = Instruction.Create(sourceInst.OpCode, targetInst);
+                    break;
                 case VariableDefinition variableDef:
-                    processor.Append(Instruction.Create(sourceInst.OpCode, variableDef));
-                    return;
-
+                    newInst = Instruction.Create(sourceInst.OpCode, variableDef);
+                    break;
                 case ParameterDefinition paramDef:
-                    processor.Append(Instruction.Create(sourceInst.OpCode, parameterMap[paramDef]));
-                    return;
-
+                    newInst = Instruction.Create(sourceInst.OpCode, paramDef);
+                    break;
                 case TypeReference typeRef:
-                    processor.Append(Instruction.Create(sourceInst.OpCode, GetOriginalType(module, typeRef, genericParamMap)));
-                    return;
-
+                    newInst = Instruction.Create(sourceInst.OpCode, GetOriginalType(typeRef));
+                    break;
                 case FieldReference fieldRef:
-                    HandleFieldReference(processor, module, sourceInst, fieldRef, genericParamMap);
-                    return;
-
+                    return HandleFieldReference(processor, sourceInst, fieldRef);
                 case MethodReference methodRef:
-                    HandleMethodReference(processor, module, sourceInst, methodRef);
-                    return;
-
+                    return HandleMethodReference(processor, sourceInst, methodRef);
                 default:
                     // 处理基本类型操作数
-                    var inst = sourceInst.Operand switch
+                    newInst = sourceInst.Operand switch
                     {
                         string strVal => Instruction.Create(sourceInst.OpCode, strVal),
                         sbyte sbyteVal => Instruction.Create(sourceInst.OpCode, sbyteVal),
@@ -387,222 +377,102 @@ namespace FastScriptReload.Editor
                         double doubleVal => Instruction.Create(sourceInst.OpCode, doubleVal),
                         _ => sourceInst
                     };
-                    processor.Append(inst);
                     break;
             }
+
+            processor.Append(newInst);
+            return newInst;
         }
         
         /// <summary>
         /// 处理方法引用指令
         /// </summary>
-        private static void HandleMethodReference(ILProcessor processor, ModuleDefinition module, Instruction sourceInst, MethodReference methodRef)
+        private static Instruction HandleMethodReference(ILProcessor processor, Instruction sourceInst, MethodReference methodRef)
         {
+            var module = methodRef.Module;
+
+            Instruction newInst = null;
             if (HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookType))
             {
                 // 处理新增方法调用
                 if (hookType.TryGetAddedMethod(methodRef.FullName, out var addedMethodInfo))
                 {
-                    methodRef = module.ImportReference(addedMethodInfo.MethodDefinition);
-                    processor.Append(Instruction.Create(sourceInst.OpCode, methodRef));
-                    return;
+                    newInst = Instruction.Create(sourceInst.OpCode, module.ImportReference(addedMethodInfo.MethodDefinition));
+                    processor.Append(newInst);
+
+                    return newInst;
                 }
 
                 // 处理泛型方法调用
-                if (methodRef.IsGenericInstance && hookType.ModifiedMethods.TryGetValue(methodRef.GetElementMethod().FullName, out var modifiedMethodInfo))
+                if (methodRef is GenericInstanceMethod genericMethod 
+                    && hookType.ModifiedMethods.TryGetValue(methodRef.GetElementMethod().FullName, out var modifiedMethodInfo))
                 {
-                    // 导入修改后的方法定义（泛型方法定义）
-                    var elementMethodRef = module.ImportReference(modifiedMethodInfo.MethodDefinition);
+                    var genericInstanceMethod = CreateGenericInstanceMethod(genericMethod, modifiedMethodInfo.MethodDefinition);
+                    newInst = Instruction.Create(sourceInst.OpCode, genericInstanceMethod);
+                    processor.Append(newInst);
 
-                    // 从源方法引用创建泛型实例方法，复制泛型参数
-                    var genericInstanceMethod = MonoCecilHelper.CreateGenericInstanceMethodFromSource(elementMethodRef, methodRef,
-                        typeRef => GetOriginalType(module, typeRef));
-                    processor.Append(Instruction.Create(sourceInst.OpCode, genericInstanceMethod));
-                    return;
+                    return newInst;
                 }
             }
 
-            var originalMethodRef = GetOriginalMethodReference(module, methodRef);
+            var originalMethodRef = GetOriginalMethodReference(methodRef);
             if (originalMethodRef == null)
             {
                 LoggerScoped.LogWarning($"从原程序集获取方法引用失败: {methodRef.FullName}");
                 originalMethodRef = module.ImportReference(methodRef);
             }
 
-            processor.Append(Instruction.Create(sourceInst.OpCode, originalMethodRef));
+            newInst = Instruction.Create(sourceInst.OpCode, originalMethodRef);
+            processor.Append(newInst);
+            return newInst;
+        }
+
+        private static GenericInstanceMethod CreateGenericInstanceMethod(GenericInstanceMethod originalMethod, MethodReference methodRef)
+        {
+            var genericInstanceMethod = new GenericInstanceMethod(methodRef);
+            // 添加泛型参数
+            foreach (var typeRef in originalMethod.GenericArguments)
+            {
+                genericInstanceMethod.GenericArguments.Add(GetOriginalType(typeRef));
+            }
+
+            return genericInstanceMethod;
         }
 
         /// <summary>
         /// 处理字段引用指令
         /// </summary>
-        private static void HandleFieldReference(ILProcessor processor, ModuleDefinition module, Instruction sourceInst,
-            FieldReference fieldRef, Dictionary<GenericParameter, GenericParameter> genericParamMap)
+        private static Instruction HandleFieldReference(ILProcessor processor, Instruction sourceInst, FieldReference fieldRef)
         {
             // 处理新增字段的访问
-            if (HookTypeInfoCache.TryGetValue(fieldRef.DeclaringType?.FullName ?? string.Empty, out var hookTypeInfo)
+            if (HookTypeInfoCache.TryGetValue(fieldRef.DeclaringType.FullName, out var hookTypeInfo)
                 && hookTypeInfo.AddedFields.ContainsKey(fieldRef.FullName))
             {
                 var code = sourceInst.OpCode.Code;
-                var isStatic = code == Code.Ldsfld || code == Code.Stsfld || code == Code.Ldsflda;
-
                 switch (code)
                 {
                     case Code.Ldfld:
                     case Code.Ldsfld:
-                        ReplaceFieldLoadWithGetHolder(processor, sourceInst, fieldRef, module, genericParamMap, isStatic);
-                        return;
+                        return ReplaceFieldLoadWithGetHolder(processor, fieldRef, code is Code.Ldsfld);
                     case Code.Stfld:
                     case Code.Stsfld:
-                        ReplaceFieldStoreWithGetHolder(processor, sourceInst, fieldRef, module, genericParamMap, isStatic);
-                        return;
+                        return ReplaceFieldStoreWithGetHolder(processor, fieldRef, code is Code.Stsfld);
                     case Code.Ldflda:
                     case Code.Ldsflda:
-                        ReplaceFieldAddressWithGetRef(processor, sourceInst, fieldRef, module, genericParamMap, isStatic);
-                        return;
+                        return ReplaceFieldAddressWithGetRef(processor, fieldRef, code is Code.Ldsflda);
                 }
             }
 
             // 普通字段引用处理
-            var newFieldType = GetOriginalType(module, fieldRef.FieldType, genericParamMap);
-            var newDeclaringType = GetOriginalType(module, fieldRef.DeclaringType, genericParamMap);
+            var newFieldType = GetOriginalType(fieldRef.FieldType);
+            var newDeclaringType = GetOriginalType(fieldRef.DeclaringType);
             var newFieldRef = fieldRef.DeclaringType == null
                 ? new FieldReference(fieldRef.Name, newFieldType)
                 : new FieldReference(fieldRef.Name, newFieldType, newDeclaringType);
 
-            processor.Append(Instruction.Create(sourceInst.OpCode, newFieldRef));
-        }
-
-        /// <summary>
-        /// 获取 FieldResolver&lt;TOwner&gt;.GetHolder&lt;TField&gt; 方法引用
-        /// </summary>
-        private static MethodReference GetFieldResolverGetHolderMethodReference(ModuleDefinition module, TypeReference ownerType, TypeReference fieldType)
-        {
-            try
-            {
-                var fieldResolverOpenType = typeof(FieldResolver<>);
-                var fieldResolverTypeRef = module.ImportReference(fieldResolverOpenType);
-                var fieldResolverGenericType = MonoCecilHelper.CreateGenericInstanceType(fieldResolverTypeRef, ownerType);
-                if (fieldResolverGenericType == null)
-                {
-                    LoggerScoped.LogError("无法创建 FieldResolver 泛型实例类型");
-                    return null;
-                }
-
-                var fieldHolderOpenType = typeof(FieldHolder<>);
-                var fieldHolderTypeRef = module.ImportReference(fieldHolderOpenType);
-
-                var methodRef = new MethodReference("GetHolder", fieldHolderTypeRef, fieldResolverGenericType)
-                {
-                    HasThis = false,
-                    ExplicitThis = false,
-                    CallingConvention = MethodCallingConvention.Default
-                };
-
-                var genericParam = new GenericParameter("TField", methodRef);
-                methodRef.GenericParameters.Add(genericParam);
-
-                var fieldHolderGenericType = MonoCecilHelper.CreateGenericInstanceType(fieldHolderTypeRef, genericParam);
-                if (fieldHolderGenericType == null)
-                {
-                    LoggerScoped.LogError("无法创建 FieldHolder 泛型实例类型");
-                    return null;
-                }
-                methodRef.ReturnType = fieldHolderGenericType;
-
-                methodRef.Parameters.Add(new ParameterDefinition("instance", ParameterAttributes.None, module.TypeSystem.Object));
-                methodRef.Parameters.Add(new ParameterDefinition("fieldName", ParameterAttributes.None, module.TypeSystem.String));
-
-                var genericInstanceMethod = MonoCecilHelper.CreateGenericInstanceMethod(methodRef, fieldType);
-                if (genericInstanceMethod == null)
-                {
-                    LoggerScoped.LogError("无法创建 GetHolder 泛型实例方法");
-                    return null;
-                }
-
-                LoggerScoped.LogDebug($"成功创建 GetHolder 方法引用: FieldResolver<{ownerType.FullName}>.GetHolder<{fieldType.FullName}>");
-                return genericInstanceMethod;
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogError($"构建 FieldResolver.GetHolder 方法引用失败: {ex.Message}");
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// 获取 FieldHolder&lt;TField&gt;.F 字段引用
-        /// </summary>
-        private static FieldReference GetFieldHolderFReference(ModuleDefinition module, TypeReference fieldType)
-        {
-            try
-            {
-                var fieldHolderOpenType = typeof(FieldHolder<>);
-                var fieldHolderTypeRef = module.ImportReference(fieldHolderOpenType);
-
-                var fieldHolderGenericType = MonoCecilHelper.CreateGenericInstanceType(fieldHolderTypeRef, fieldType);
-                if (fieldHolderGenericType == null)
-                {
-                    LoggerScoped.LogError("无法创建 FieldHolder 泛型实例类型");
-                    return null;
-                }
-
-                var fieldHolderClosedType = fieldHolderOpenType.MakeGenericType(typeof(object));
-                var fFieldInfo = fieldHolderClosedType.GetField("F", BindingFlags.Public | BindingFlags.Instance);
-                if (fFieldInfo == null)
-                {
-                    LoggerScoped.LogError("无法通过反射找到 FieldHolder.F 字段");
-                    return null;
-                }
-
-                var fFieldRef = module.ImportReference(fFieldInfo);
-                var declaringTypeProperty = typeof(FieldReference).GetProperty("DeclaringType");
-                declaringTypeProperty?.SetValue(fFieldRef, fieldHolderGenericType);
-
-                return fFieldRef;
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogError($"构建 FieldHolder.F 字段引用失败: {ex.Message}");
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// 获取 FieldHolder&lt;TField&gt;.GetRef 方法引用
-        /// </summary>
-        private static MethodReference GetFieldHolderGetRefMethodReference(ModuleDefinition module, TypeReference fieldType)
-        {
-            try
-            {
-                var fieldHolderOpenType = typeof(FieldHolder<>);
-                var fieldHolderTypeRef = module.ImportReference(fieldHolderOpenType);
-
-                var fieldHolderGenericType = MonoCecilHelper.CreateGenericInstanceType(fieldHolderTypeRef, fieldType);
-                if (fieldHolderGenericType == null)
-                {
-                    LoggerScoped.LogError("无法创建 FieldHolder 泛型实例类型");
-                    return null;
-                }
-
-                var fieldHolderClosedType = fieldHolderOpenType.MakeGenericType(typeof(object));
-                var getRefMethodInfo = fieldHolderClosedType.GetMethod("GetRef", BindingFlags.Public | BindingFlags.Instance);
-                if (getRefMethodInfo == null)
-                {
-                    LoggerScoped.LogError("无法通过反射找到 FieldHolder.GetRef 方法");
-                    return null;
-                }
-
-                var methodRef = module.ImportReference(getRefMethodInfo);
-                var declaringTypeProperty = typeof(MethodReference).GetProperty("DeclaringType");
-                declaringTypeProperty?.SetValue(methodRef, fieldHolderGenericType);
-
-                LoggerScoped.LogDebug($"成功创建 GetRef 方法引用: FieldHolder<{fieldType.FullName}>.GetRef()");
-                return methodRef;
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogError($"构建 FieldHolder.GetRef 方法引用失败: {ex.Message}");
-                return null;
-            }
+            var newInst = Instruction.Create(sourceInst.OpCode, newFieldRef);
+            processor.Append(newInst);
+            return newInst;
         }
 
         /// <summary>
@@ -610,41 +480,25 @@ namespace FastScriptReload.Editor
         /// 实例字段：instance.Field → GetHolder(instance, "Field").F
         /// 静态字段：Class.Field → GetHolder(null, "Field").F
         /// </summary>
-        private static void ReplaceFieldLoadWithGetHolder(ILProcessor processor, Instruction ldfldInst, FieldReference fieldRef,
-            ModuleDefinition module, Dictionary<GenericParameter, GenericParameter> genericParamMap, bool isStatic)
+        private static Instruction ReplaceFieldLoadWithGetHolder(ILProcessor processor, FieldReference fieldRef, bool isStatic)
         {
-            try
+            var fieldType = GetOriginalType(fieldRef.FieldType);
+            var ownerType = GetOriginalType(fieldRef.DeclaringType);
+
+            var getHolderMethodRef = FieldResolverHelper.GetFieldResolverGetHolderMethodReference(ownerType, fieldType);
+            var fFieldRef = FieldResolverHelper.GetFieldHolderFReference(fieldType);
+
+            // 生成指令序列
+            if (isStatic)
             {
-                var fieldType = GetOriginalType(module, fieldRef.FieldType, genericParamMap);
-                var ownerType = GetOriginalType(module, fieldRef.DeclaringType, genericParamMap);
-
-                var getHolderMethodRef = GetFieldResolverGetHolderMethodReference(module, ownerType, fieldType);
-                var fFieldRef = GetFieldHolderFReference(module, fieldType);
-
-                if (getHolderMethodRef == null || fFieldRef == null)
-                {
-                    LoggerScoped.LogError($"无法获取字段引用: {fieldRef.FullName}");
-                    processor.Append(Instruction.Create(ldfldInst.OpCode, fieldRef));
-                    return;
-                }
-
-                // 生成指令序列
-                if (isStatic)
-                {
-                    processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Ldnull")));
-                }
-
-                processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Ldstr"), fieldRef.Name));
-                processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Call"), getHolderMethodRef));
-                processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Ldfld"), fFieldRef));
-                
-                LoggerScoped.LogDebug($"成功替换 {(isStatic ? "ldsfld" : "ldfld")} 指令: {fieldRef.FullName}");
+                processor.Append(Instruction.Create(OpCodes.Ldnull));
             }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogError($"替换 {(isStatic ? "ldsfld" : "ldfld")} 指令失败: {fieldRef.FullName}, 错误: {ex.Message}");
-                processor.Append(Instruction.Create(ldfldInst.OpCode, fieldRef));
-            }
+            processor.Append(Instruction.Create(OpCodes.Ldstr, fieldRef.Name));
+            processor.Append(Instruction.Create(OpCodes.Call, getHolderMethodRef));
+            var lastInst = Instruction.Create(OpCodes.Ldfld, fFieldRef);
+            processor.Append(lastInst);
+
+            return lastInst;
         }
 
         /// <summary>
@@ -652,32 +506,17 @@ namespace FastScriptReload.Editor
         /// 实例字段：instance.Field = value → Store(instance, value, "Field")
         /// 静态字段：Class.Field = value → Store(value, "Field")
         /// </summary>
-        private static void ReplaceFieldStoreWithGetHolder(ILProcessor processor, Instruction stfldInst, FieldReference fieldRef, 
-            ModuleDefinition module, Dictionary<GenericParameter, GenericParameter> genericParamMap, bool isStatic)
+        private static Instruction ReplaceFieldStoreWithGetHolder(ILProcessor processor, FieldReference fieldRef, bool isStatic)
         {
-            try
-            {
-                var fieldType = GetOriginalType(module, fieldRef.FieldType, genericParamMap);
-                var ownerType = GetOriginalType(module, fieldRef.DeclaringType, genericParamMap);
+            var fieldType = GetOriginalType(fieldRef.FieldType);
+            var ownerType = GetOriginalType(fieldRef.DeclaringType);
 
-                var storeMethodRef = GetFieldResolverStoreMethodReference(module, ownerType, fieldType, isStatic);
-                if (storeMethodRef == null)
-                {
-                    LoggerScoped.LogError($"无法获取 Store 方法引用: {fieldRef.FullName}");
-                    processor.Append(Instruction.Create(stfldInst.OpCode, fieldRef));
-                    return;
-                }
+            var storeMethodRef = FieldResolverHelper.GetFieldResolverStoreMethodReference(ownerType, fieldType, isStatic);
+            processor.Append(Instruction.Create(OpCodes.Ldstr, fieldRef.Name));
+            var lastInst = Instruction.Create(OpCodes.Call, storeMethodRef);
+            processor.Append(lastInst);
 
-                processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Ldstr"), fieldRef.Name));
-                processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Call"), storeMethodRef));
-                
-                LoggerScoped.LogDebug($"成功替换 {(isStatic ? "stsfld" : "stfld")} 指令: {fieldRef.FullName}");
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogError($"替换 {(isStatic ? "stsfld" : "stfld")} 指令失败: {fieldRef.FullName}, 错误: {ex.Message}");
-                processor.Append(Instruction.Create(stfldInst.OpCode, fieldRef));
-            }
+            return lastInst;
         }
         
         /// <summary>
@@ -685,99 +524,26 @@ namespace FastScriptReload.Editor
         /// 实例字段：ref instance.Field → GetHolder(instance, "Field").GetRef()
         /// 静态字段：ref Class.Field → GetHolder(null, "Field").GetRef()
         /// </summary>
-        private static void ReplaceFieldAddressWithGetRef(ILProcessor processor, Instruction ldfldaInst, FieldReference fieldRef,
-            ModuleDefinition module, Dictionary<GenericParameter, GenericParameter> genericParamMap, bool isStatic)
+        private static Instruction ReplaceFieldAddressWithGetRef(ILProcessor processor, FieldReference fieldRef, bool isStatic)
         {
-            try
+            var fieldType = GetOriginalType(fieldRef.FieldType);
+            var ownerType = GetOriginalType(fieldRef.DeclaringType);
+
+            var getHolderMethodRef = FieldResolverHelper.GetFieldResolverGetHolderMethodReference(ownerType, fieldType);
+            var getRefMethodRef = FieldResolverHelper.GetFieldHolderGetRefMethodReference(fieldType);
+
+            if (isStatic)
             {
-                var fieldType = GetOriginalType(module, fieldRef.FieldType, genericParamMap);
-                var ownerType = GetOriginalType(module, fieldRef.DeclaringType, genericParamMap);
-
-                var getHolderMethodRef = GetFieldResolverGetHolderMethodReference(module, ownerType, fieldType);
-                var getRefMethodRef = GetFieldHolderGetRefMethodReference(module, fieldType);
-
-                if (getHolderMethodRef == null || getRefMethodRef == null)
-                {
-                    LoggerScoped.LogError($"无法获取字段引用: {fieldRef.FullName}");
-                    processor.Append(Instruction.Create(ldfldaInst.OpCode, fieldRef));
-                    return;
-                }
-
-                if (isStatic)
-                {
-                    processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Ldnull")));
-                }
-
-                processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Ldstr"), fieldRef.Name));
-                processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Call"), getHolderMethodRef));
-                processor.Append(Instruction.Create(MonoCecilHelper.GetOpCode("Callvirt"), getRefMethodRef));
-                
-                LoggerScoped.LogDebug($"成功替换 {(isStatic ? "ldsflda" : "ldflda")} 指令: {fieldRef.FullName}");
+                processor.Append(Instruction.Create(OpCodes.Ldnull));
             }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogError($"替换 {(isStatic ? "ldsflda" : "ldflda")} 指令失败: {fieldRef.FullName}, 错误: {ex.Message}");
-                processor.Append(Instruction.Create(ldfldaInst.OpCode, fieldRef));
-            }
+
+            processor.Append(Instruction.Create(OpCodes.Ldstr, fieldRef.Name));
+            processor.Append(Instruction.Create(OpCodes.Call, getHolderMethodRef));
+            var lastInst = Instruction.Create(OpCodes.Callvirt, getRefMethodRef);
+            processor.Append(lastInst);
+
+            return lastInst;
         }
-        
-        /// <summary>
-        /// 获取 FieldResolver&lt;TOwner&gt;.Store&lt;TField&gt; 方法引用
-        /// 实例字段：Store(object instance, TField value, string fieldName)
-        /// 静态字段：Store(TField value, string fieldName)
-        /// </summary>
-        private static MethodReference GetFieldResolverStoreMethodReference(ModuleDefinition module, TypeReference ownerType, TypeReference fieldType, bool isStatic)
-        {
-            try
-            {
-                var fieldResolverOpenType = typeof(FieldResolver<>);
-                var fieldResolverTypeRef = module.ImportReference(fieldResolverOpenType);
-                var fieldResolverGenericType = MonoCecilHelper.CreateGenericInstanceType(fieldResolverTypeRef, ownerType);
-                if (fieldResolverGenericType == null)
-                {
-                    LoggerScoped.LogError("无法创建 FieldResolver 泛型实例类型");
-                    return null;
-                }
-
-                var methodRef = new MethodReference("Store", module.TypeSystem.Void, fieldResolverGenericType)
-                {
-                    HasThis = false,
-                    ExplicitThis = false,
-                    CallingConvention = MethodCallingConvention.Default
-                };
-
-                var genericParam = new GenericParameter("TField", methodRef);
-                methodRef.GenericParameters.Add(genericParam);
-
-                if (isStatic)
-                {
-                    methodRef.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, genericParam));
-                    methodRef.Parameters.Add(new ParameterDefinition("fieldName", ParameterAttributes.None, module.TypeSystem.String));
-                }
-                else
-                {
-                    methodRef.Parameters.Add(new ParameterDefinition("instance", ParameterAttributes.None, module.TypeSystem.Object));
-                    methodRef.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, genericParam));
-                    methodRef.Parameters.Add(new ParameterDefinition("fieldName", ParameterAttributes.None, module.TypeSystem.String));
-                }
-
-                var genericInstanceMethod = MonoCecilHelper.CreateGenericInstanceMethod(methodRef, fieldType);
-                if (genericInstanceMethod == null)
-                {
-                    LoggerScoped.LogError("无法创建 Store 泛型实例方法");
-                    return null;
-                }
-
-                LoggerScoped.LogDebug($"成功创建 Store 方法引用: FieldResolver<{ownerType.FullName}>.Store<{fieldType.FullName}>({(isStatic ? "2参数" : "3参数")})");
-                return genericInstanceMethod;
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogError($"构建 FieldResolver.Store 方法引用失败: {ex.Message}");
-                return null;
-            }
-        }
-        
         #endregion
 
         #region 类型和方法引用处理
@@ -785,97 +551,77 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 获取原类型引用
         /// </summary>
-        private static TypeReference GetOriginalType(ModuleDefinition module, TypeReference operandTypeRef,
-            Dictionary<GenericParameter, GenericParameter> genericParamMap = null)
+        private static TypeReference GetOriginalType(TypeReference typeRef)
         {
-            if (operandTypeRef == null)
+            var module = typeRef.Module;
+
+            // 只有定义在当前程序集才需要重定向到原类型
+            if (!typeRef.Scope.Name.Equals(module.Name))
             {
-                return null;
+                return typeRef;
             }
 
-            if (operandTypeRef is GenericParameter operandGenericParameter &&
-                genericParamMap != null && genericParamMap.TryGetValue(operandGenericParameter, out var genericParameter))
+            if (typeRef.IsGenericParameter)
             {
-                return genericParameter;
+                return typeRef;
             }
 
-            if (operandTypeRef.IsGenericInstance)
+            if (typeRef is GenericInstanceType genericInstanceType)
             {
-                var arguments = MonoCecilHelper.GetGenericArguments(operandTypeRef).ToArray();
-                for (int i = 0; i < arguments.Length; i++)
+                foreach (var genericArgument in genericInstanceType.GenericArguments)
                 {
-                    arguments[i] = GetOriginalType(module, arguments[i], genericParamMap);
+                    genericArgument.DeclaringType = GetOriginalType(genericArgument.DeclaringType);
                 }
-                return MonoCecilHelper.CreateGenericInstanceType(operandTypeRef.GetElementType(), arguments);
+
+                return typeRef;
             }
 
-            if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(operandTypeRef.FullName, out var originalType))
+            if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeRef.FullName, out var originalType))
             {
                 return module.ImportReference(originalType);
             }
 
-            return operandTypeRef;
+            return typeRef;
         }
 
         /// <summary>
         /// 从原程序集中获取方法引用
         /// </summary>
-        private static MethodReference GetOriginalMethodReference(ModuleDefinition module, MethodReference methodRef)
+        private static MethodReference GetOriginalMethodReference(MethodReference methodRef)
         {
             try
             {
-                var declaringTypeFullName = methodRef.DeclaringType.IsNested
-                    ? methodRef.DeclaringType.DeclaringType.FullName
-                    : methodRef.DeclaringType.FullName;
+                var module = methodRef.Module;
 
-                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(declaringTypeFullName, out var originalType))
+                // 只有定义在当前程序集才需要重定向到原方法
+                if (!methodRef.DeclaringType.Scope.Name.Equals(module.Name))
                 {
-                    return module.ImportReference(methodRef);
+                    return methodRef;
                 }
 
-                // 作用域与原类型一致
-                if (originalType.Assembly.GetName().Name.Equals(methodRef.DeclaringType.Scope?.Name))
+                // 从原类型中获取方法引用
+                if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(methodRef.DeclaringType.FullName, out var originalType))
                 {
-                    return module.ImportReference(methodRef);
+                    var originalMethods = originalType.GetAllMethods();
+                    var originalMethodName = methodRef.IsGenericInstance
+                        ? methodRef.GetElementMethod().FullName
+                        : methodRef.FullName;
+
+                    if (!originalMethods.TryGetValue(originalMethodName, out var method))
+                    {
+                        return methodRef;
+                    }
+
+                    var originalMethodRef = module.ImportReference(method);
+                    if (methodRef is GenericInstanceMethod genericMethod)
+                    {
+                        originalMethodRef = CreateGenericInstanceMethod(genericMethod, originalMethodRef);
+                    }
+
+                    return originalMethodRef;
                 }
 
-                var originalAssemblyDef = GetOrReadAssemblyDefinition(originalType.Assembly.Location);
-                var originalTypeDef = originalAssemblyDef?.MainModule.Types.FirstOrDefault(t => t.FullName == declaringTypeFullName);
-                
-                if (methodRef.DeclaringType.IsNested)
-                {
-                    originalTypeDef = originalTypeDef?.NestedTypes.FirstOrDefault(definition => definition.FullName.Equals(methodRef.DeclaringType.FullName));
-                }
-                
-                if (originalTypeDef == null)
-                {
-                    return null;
-                }
-
-                var templateMethodRefFullName = methodRef.IsGenericInstance
-                    ? methodRef.GetElementMethod().FullName
-                    : methodRef.FullName;
-
-                var methods = originalTypeDef.Methods.Where(m => m.FullName == templateMethodRefFullName).ToArray();
-                switch (methods.Length)
-                {
-                    case 0:
-                        return null;
-                    case > 1:
-                        throw new Exception($"方法重载过多: {methodRef.FullName}");
-                }
-
-                if (!methodRef.IsGenericInstance)
-                {
-                    return module.ImportReference(methods[0]);
-                }
-
-                // 创建泛型实例
-                var originalMethodRef = module.ImportReference(methods[0]);
-
-                var genericInstanceMethod = MonoCecilHelper.CreateGenericInstanceMethodFromSource(originalMethodRef, methodRef, typeRef => GetOriginalType(module, typeRef));
-
-                return genericInstanceMethod ?? module.ImportReference(methodRef);
+                return methodRef;
             }
             catch (Exception ex)
             {

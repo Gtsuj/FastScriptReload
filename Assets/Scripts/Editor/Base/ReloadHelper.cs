@@ -7,6 +7,7 @@ using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Mono.Cecil;
+using Mono.Cecil.Pdb;
 using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEngine;
@@ -26,6 +27,12 @@ namespace FastScriptReload.Editor
     {
         public static string AssemblyPath;
 
+        public static readonly ReaderParameters READER_PARAMETERS = new()
+            { ReadWrite = true, InMemory = true, ReadSymbols = true, SymbolReaderProvider = new PdbReaderProvider() };
+
+        public static readonly WriterParameters WRITER_PARAMETERS = new()
+            { WriteSymbols = true, SymbolWriterProvider = new PdbWriterProvider() };
+
         /// <summary>
         /// 修改过的类型缓存
         /// </summary>
@@ -36,17 +43,15 @@ namespace FastScriptReload.Editor
         /// </summary>
         public static Dictionary<string, Assembly> AssemblyCache = new();
         
+        /// <summary>
+        /// 当前Hook流程中编译的程序集
+        /// </summary>
         private static AssemblyDefinition _assemblyDefinition;
 
         /// <summary>
         /// 程序集定义缓存（程序集路径 -> AssemblyDefinition）
         /// </summary>
         private static readonly Dictionary<string, AssemblyDefinition> _assemblyDefinitionCache = new(StringComparer.OrdinalIgnoreCase);
-
-        /// <summary>
-        /// 程序集引用缓存（避免重复遍历AppDomain）
-        /// </summary>
-        private static List<MetadataReference> _assemblyReferencesCache;
 
         /// <summary>
         /// 文件路径到程序集的映射缓存（用于确定文件所属程序集）
@@ -134,37 +139,6 @@ namespace FastScriptReload.Editor
             }
 
             return assemblyDef;
-        }
-
-        /// <summary>
-        /// 获取或解析程序集引用列表
-        /// </summary>
-        public static List<MetadataReference> GetOrResolveAssemblyReferences()
-        {
-            if (_assemblyReferencesCache != null)
-            {
-                return _assemblyReferencesCache;
-            }
-
-            var references = new List<MetadataReference>();
-
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                if (AssemblyCache.ContainsKey(assembly.GetName().Name))
-                {
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(assembly.Location))
-                {
-                    continue;
-                }
-
-                references.Add(MetadataReference.CreateFromFile(assembly.Location));
-            }
-
-            _assemblyReferencesCache = references;
-            return references;
         }
 
         #region 程序集识别和分组

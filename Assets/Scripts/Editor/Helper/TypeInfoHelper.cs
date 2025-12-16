@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Threading;
+using HarmonyLib;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -21,8 +22,9 @@ namespace FastScriptReload.Editor
     {
         private static bool _isInitialized;
         private static CSharpCompilation _compilation;
-        public static readonly ConcurrentDictionary<string, TypeInfo> TypeInfoCache = new();
         private static readonly ConcurrentDictionary<string, FileSnapshot> _fileSnapshots = new();
+
+        public static readonly ConcurrentDictionary<string, TypeInfo> TypeInfoCache = new();
 
         /// <summary>
         /// 初始化并收集所有类型信息（同步版本，保持向后兼容）
@@ -36,7 +38,7 @@ namespace FastScriptReload.Editor
 
             // if (_isInitialized) return;
             
-            CollectAllTypeInfoAsync();
+            CollectAllTypeInfo();
 
             _isInitialized = true;
         }
@@ -118,7 +120,7 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 收集所有类型信息（并行处理版本，阻塞主线程直到完成）
         /// </summary>
-        private static void CollectAllTypeInfoAsync()
+        private static void CollectAllTypeInfo()
         {
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
@@ -137,9 +139,12 @@ namespace FastScriptReload.Editor
 
             var syntaxTreeList = syntaxTrees.ToList();
 
+            var metadataReferences = AppDomain.CurrentDomain.GetAssemblies()
+                .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
+                .Select(a => MetadataReference.CreateFromFile(a.Location));
             _compilation = CSharpCompilation.Create(
-                "TypeInfoCollection", syntaxTreeList, 
-                ReloadHelper.GetOrResolveAssemblyReferences(),
+                "TypeInfoCollection", syntaxTreeList,
+                metadataReferences,
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
             
             Parallel.ForEach(syntaxTreeList, tree =>
@@ -147,39 +152,6 @@ namespace FastScriptReload.Editor
                 SemanticModel semanticModel = _compilation.GetSemanticModel(tree);
                 CollectTypeInfoFromFile(semanticModel);
             });
-
-            stopwatch.Stop();
-            LoggerScoped.Log($"类型信息收集完成，耗时: {stopwatch.ElapsedMilliseconds}ms, 收集类型数: {TypeInfoCache.Count}");
-        }
-
-        /// <summary>
-        /// 收集所有类型信息（同步版本，保持向后兼容）
-        /// </summary>
-        private static void CollectAllTypeInfo()
-        {
-            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-
-            var syntaxTrees = new List<SyntaxTree>();
-            
-            var filePaths = Directory.GetFiles(Application.dataPath, "*.cs", SearchOption.AllDirectories);
-            foreach (var filePath in filePaths)
-            {
-                SaveFileSnapshot(filePath, out var fileSnapshot);
-                syntaxTrees.Add(fileSnapshot.SyntaxTree);
-            }
-
-            _compilation = CSharpCompilation.Create(
-                "TypeInfoCollection", syntaxTrees, 
-                ReloadHelper.GetOrResolveAssemblyReferences(),
-                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
-
-            Profiler.BeginSample("CollectTypeInfoFromFile");
-            foreach (var tree in syntaxTrees)
-            {
-                var semanticModel = _compilation.GetSemanticModel(tree);
-                CollectTypeInfoFromFile(semanticModel);
-            }
-            Profiler.EndSample();
 
             stopwatch.Stop();
             LoggerScoped.Log($"类型信息收集完成，耗时: {stopwatch.ElapsedMilliseconds}ms, 收集类型数: {TypeInfoCache.Count}");
@@ -283,14 +255,10 @@ namespace FastScriptReload.Editor
                 }
             }
         }
-
-        // 使用线程本地存储来避免多线程冲突
-        private static readonly ThreadLocal<GenericMethodCallWalker> _collector = new (() => new GenericMethodCallWalker());
         
         private static void CollectUsedGenericMethods(TypeInfo typeInfo, TypeDeclarationSyntax typeDecl, SemanticModel semanticModel)
         {
             var filePath = semanticModel.SyntaxTree.FilePath;
-            // var collector = _collector.Value; // 获取当前线程的 collector 实例
             var collector = new GenericMethodCallWalker();
             collector.SetSemanticModel(semanticModel);
             collector.Analyze(typeDecl);
