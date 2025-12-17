@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Reflection;
 using System.Text;
 using HarmonyLib;
@@ -54,7 +53,7 @@ namespace FastScriptReload.Editor
                 return null;
             }
 
-            var syntaxTree = CSharpSyntaxTree.ParseText(content, PARSE_OPTIONS, path: filePath);
+            var syntaxTree = CSharpSyntaxTree.ParseText(content, PARSE_OPTIONS, path: filePath, encoding: Encoding.UTF8);
 
             return syntaxTree;
         }
