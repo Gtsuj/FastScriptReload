@@ -7,6 +7,7 @@ using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Emit;
 using Mono.Cecil;
 using Mono.Cecil.Pdb;
 
@@ -67,12 +68,12 @@ namespace FastScriptReload.Editor
                 compilation = compilation.AddSyntaxTrees(syntaxTrees.Values);
 
                 var ms = new MemoryStream();
-                var emitResult = compilation.Emit(ms);
+                var emitResult = compilation.Emit(ms, options:EMIT_OPTIONS);
 
                 if (emitResult.Success)
                 {
                     ms.Seek(0, SeekOrigin.Begin);
-                    _assemblyDefinition = AssemblyDefinition.ReadAssembly(ms, READER_PARAMETERS);
+                    _assemblyDefinition = AssemblyDefinition.ReadAssembly(ms, ReaderParameters);
 
                     return typeDiffs;
                 }

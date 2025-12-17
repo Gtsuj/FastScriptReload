@@ -1,12 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Reflection;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Emit;
 using Mono.Cecil;
+using Mono.Cecil.Cil;
 using Mono.Cecil.Pdb;
 using UnityEditor;
 using UnityEditor.Compilation;
@@ -25,13 +24,15 @@ namespace FastScriptReload.Editor
     /// </summary>
     public static partial class ReloadHelper
     {
+        public static readonly EmitOptions EMIT_OPTIONS = new (debugInformationFormat:DebugInformationFormat.PortablePdb);
+
         public static string AssemblyPath;
 
-        public static readonly ReaderParameters READER_PARAMETERS = new()
-            { ReadWrite = true, InMemory = true, ReadSymbols = true, SymbolReaderProvider = new PdbReaderProvider() };
+        public static WriterParameters WriterParameters => new()
+            { WriteSymbols = true, SymbolWriterProvider = new PortablePdbWriterProvider() };
 
-        public static readonly WriterParameters WRITER_PARAMETERS = new()
-            { WriteSymbols = true, SymbolWriterProvider = new PdbWriterProvider() };
+        public static ReaderParameters ReaderParameters => new()
+            { ReadWrite = true, InMemory = true };
 
         /// <summary>
         /// 修改过的类型缓存
