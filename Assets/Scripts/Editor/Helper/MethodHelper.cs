@@ -4,6 +4,9 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using HarmonyLib;
+using Mono.Cecil;
+using MethodAttributes = System.Reflection.MethodAttributes;
+using MethodImplAttributes = System.Reflection.MethodImplAttributes;
 
 namespace FastScriptReload.Editor
 {
@@ -44,13 +47,35 @@ namespace FastScriptReload.Editor
         }
 #endif
 
-        public static Dictionary<string, MethodBase> GetAllMethods(this Type type)
+        public static Dictionary<string, MethodBase> GetAllMethods(this Type type, ModuleDefinition moduleDef)
         {
-            // 找出修改的方法，并使用LINQ直接转换为字典
             return type.GetConstructors(AccessTools.allDeclared)
                 .Cast<MethodBase>()
                 .Concat(type.GetMethods(AccessTools.allDeclared))
-                .ToDictionary(m => m.FullName(), m => m);
+                .ToDictionary(m => moduleDef.ImportReference(m).FullName, m => m);
+        }
+
+        public static MethodReference GetMethodReference(this Type type, ModuleDefinition moduleDef, string methodName)
+        {
+            foreach (var method in type.GetMethods(AccessTools.allDeclared))
+            {
+                var methodRef = moduleDef.ImportReference(method);
+                if (methodRef.FullName.Equals(methodName))
+                {
+                    return methodRef;
+                }
+            }
+            
+            foreach (var method in type.GetConstructors(AccessTools.allDeclared))
+            {
+                var methodRef = moduleDef.ImportReference(method);
+                if (methodRef.FullName.Equals(methodName))
+                {
+                    return methodRef;
+                }
+            }
+
+            return null;
         }
 
         //see _MonoMethod struct in class-internals.h

@@ -171,6 +171,7 @@ namespace FastScriptReload.Editor
                 {
                     var paramTypeName = param.Type.ToDisplayString(TYPE_FORMAT);
                     paramTypeName = paramTypeName.Replace(param.Type.Name, param.Type.MetadataName);
+                    paramTypeName = paramTypeName.Replace(", ", ","); 
                     builder.Append(paramTypeName);
                 }
             }
@@ -199,7 +200,7 @@ namespace FastScriptReload.Editor
                     var parameterDefinition = parameters[index];
                     if (index > 0)
                         builder.Append(",");
-                    builder.Append(parameterDefinition.ParameterType.FullName ?? parameterDefinition.ParameterType.Name);
+                    builder.Append(parameterDefinition.ParameterType.ToString());
                 }
             }
 
