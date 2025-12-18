@@ -20,10 +20,15 @@ namespace FastScriptReload.Editor
 
         public static void AddMethod(MethodReference methodRef)
         {
+            if (!(methodRef.DeclaringType is TypeDefinition typeDef))
+            {
+                return;
+            }
+
             var fullName = methodRef.DeclaringType.FullName;
             if (!NestedTypeInfos.TryGetValue(fullName, out var nestedTypeInfo))
             {
-                nestedTypeInfo = new NestedTypeInfo(methodRef.DeclaringType.Resolve());
+                nestedTypeInfo = new NestedTypeInfo(typeDef);
                 NestedTypeInfos[fullName] = nestedTypeInfo;
             }
 
@@ -32,10 +37,15 @@ namespace FastScriptReload.Editor
 
         public static void AddField(FieldReference fieldRef)
         {
+            if (!(fieldRef.DeclaringType is TypeDefinition typeDef))
+            {
+                return;
+            }
+
             var fullName = fieldRef.DeclaringType.FullName;
             if (!NestedTypeInfos.TryGetValue(fullName, out var nestedTypeInfo))
             {
-                nestedTypeInfo = new NestedTypeInfo(fieldRef.DeclaringType.Resolve());
+                nestedTypeInfo = new NestedTypeInfo(typeDef);
                 NestedTypeInfos[fullName] = nestedTypeInfo;
             }
 

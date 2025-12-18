@@ -123,7 +123,7 @@ namespace FastScriptReload.Editor
             if (!_isEditorModeHotReloadEnabled && _lastPlayModeStateChange != PlayModeStateChange.EnteredPlayMode)
             {
 #if ImmersiveVrTools_DebugEnabled
-            LoggerScoped.Log($"Application not playing, change to: {e.Name} won't be compiled and hot reloaded");
+            // LoggerScoped.Log($"Application not playing, change to: {e.Name} won't be compiled and hot reloaded");
 #endif
                 return true;
             }
@@ -560,12 +560,12 @@ namespace FastScriptReload.Editor
                     c.IsBeingProcessed = true;
                 }
 
-                var unityMainThreadDispatcher = UnityMainThreadDispatcher.Instance.EnsureInitialized(); //need to pass that in, resolving on other than main thread will cause exception
+                // var unityMainThreadDispatcher = UnityMainThreadDispatcher.Instance.EnsureInitialized(); //need to pass that in, resolving on other than main thread will cause exception
                 Task.Run(() =>
-                { 
+                {
                     // 按程序集分组
                     var filesByAssembly = changesAwaitingHotReload
-                        .GroupBy(e => ReloadHelper.GetAssemblyNameForFile(e.FullFileName))
+                        .GroupBy(e => TypeInfoHelper.GetAssemblyName(e.FullFileName))
                         .ToDictionary(g => g.Key, g => g.GroupBy(e => e.FullFileName)
                             .Select(e => e.First().FullFileName).ToList());
 
@@ -590,25 +590,30 @@ namespace FastScriptReload.Editor
         {
             try
             {
-                // 编译改动的C#文件
-                var diffResults = ReloadHelper.CompileCsFiles(assemblyName, files);
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+                var diffResults = ReloadHelper.CompileAndDiff(assemblyName, files);
                 if (diffResults == null)
                 {
                     changesAwaitingHotReload.ForEach(c => c.ErrorOn = DateTime.UtcNow);
                     return;
                 }
 
+                LoggerScoped.LogDebug($"CompileAndDiff耗时: {stopwatch.ElapsedMilliseconds}ms");
+
                 // 删除冗余部分，将改动的方法转换为静态方法
-                var assemblyPath = ReloadHelper.ModifyCompileAssembly(diffResults);
+                var assemblyPath = ReloadHelper.ModifyCompileAssembly(assemblyName, diffResults);
 
                 changesAwaitingHotReload.ForEach(c =>
                 {
                     c.FileCompiledOn = DateTime.UtcNow;
                     c.AssemblyNameCompiledIn = assemblyPath;
                 });
+                LoggerScoped.LogDebug($"ModifyCompileAssembly耗时: {stopwatch.ElapsedMilliseconds}ms");
 
                 // 应用热重载Hook
                 ReloadHelper.ApplyHooks(diffResults);
+                LoggerScoped.LogDebug($"ApplyHooks耗时: {stopwatch.ElapsedMilliseconds}ms");
 
                 changesAwaitingHotReload.ForEach(c =>
                 {

@@ -23,13 +23,15 @@ namespace FastScriptReload.Editor
     {
         #region 核心方法
 
-        public static string ModifyCompileAssembly(Dictionary<string, DiffResult> results)
+        public static string ModifyCompileAssembly(string assemblyName, Dictionary<string, DiffResult> diffResults)
         {
+            _assemblyDefinition = TypeInfoHelper.CloneAndCompile(assemblyName, false);
+
             // 修改程序集
-            HandleAssemblyType(results);
+            HandleAssemblyType(diffResults);
 
             // 清理程序集
-            ClearAssembly(results);
+            ClearAssembly(diffResults);
 
             NestedTypeInfo.Clear();
 
@@ -159,7 +161,7 @@ namespace FastScriptReload.Editor
             }
             
             // 处理内部类
-            foreach (var (_, nestedTypeInfo) in NestedTypeInfo.NestedTypeInfos)
+            foreach (var (_, nestedTypeInfo) in NestedTypeInfo.NestedTypeInfos.ToArray())
             {
                 var typeDef = nestedTypeInfo.TypeDefinition;
                 foreach (var methodDef in typeDef.Methods.ToArray())
@@ -192,7 +194,7 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 清理程序集：删除未使用的类型
         /// </summary>
-        private static void ClearAssembly(Dictionary<string, DiffResult> results)
+        private static void ClearAssembly(Dictionary<string, DiffResult> diffResults)
         {
             var mainModule = _assemblyDefinition.MainModule;
 
@@ -218,7 +220,7 @@ namespace FastScriptReload.Editor
             foreach (var typeDef in mainModule.Types.ToArray())
             {
                 // 删除没有Hook的类型
-                if (!results.TryGetValue(typeDef.FullName, out var result))
+                if (!diffResults.TryGetValue(typeDef.FullName, out var result))
                 {
                     mainModule.Types.Remove(typeDef);
                     continue;
@@ -370,9 +372,12 @@ namespace FastScriptReload.Editor
             // 泛型参数引用处理
             if (methodDef.HasGenericParameters)
             {
-                foreach (var genericParameter in methodDef.GenericParameters)
+                foreach (GenericParameter genericParameter in methodDef.GenericParameters)
                 {
-                    genericParameter.DeclaringType = GetOriginalType(genericParameter.DeclaringType);
+                    foreach (var constraint in genericParameter.Constraints)
+                    {
+                        constraint.ConstraintType = GetOriginalType(constraint.ConstraintType);
+                    }
                 }
             }
 
@@ -563,6 +568,11 @@ namespace FastScriptReload.Editor
         /// </summary>
         private static TypeReference GetOriginalType(TypeReference typeRef)
         {
+            if (typeRef == null)
+            {
+                return null;
+            }
+
             var module = typeRef.Module;
 
             TypeReference originalTypeRef = null;
@@ -624,6 +634,11 @@ namespace FastScriptReload.Editor
                     return originalMethodRef;
                 }
 
+                if (methodRef is GenericInstanceMethod genericInstanceMethod1)
+                {
+                    return CreateGenericInstanceMethod(genericInstanceMethod1, null);
+                }
+                
                 if (methodRef.DeclaringType is GenericInstanceType genericInstanceType)
                 {
                     for (int i = 0; i < genericInstanceType.GenericArguments.Count; i++)
