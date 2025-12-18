@@ -18,7 +18,8 @@
         "ImmersiveVRTools.Common.Runtime.dll",
         "System.Collections.Immutable.FSR.dll",
         "Mono.Cecil.dll",
-        "Mono.Cecil.Pdb.dll"
+        "Mono.Cecil.Pdb.dll",
+        "Mono.Cecil.Rocks.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [],

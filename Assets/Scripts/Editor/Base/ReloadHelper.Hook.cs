@@ -6,6 +6,7 @@ using System.Reflection;
 using FastScriptReload.Runtime;
 using HarmonyLib;
 using ImmersiveVrToolsCommon.Runtime.Logging;
+using UnityEngine;
 
 namespace FastScriptReload.Editor
 {
@@ -39,7 +40,7 @@ namespace FastScriptReload.Editor
                     wrapperAssembly = Assembly.LoadFrom(wrapperAssemblyPath);
                     AssemblyCache[wrapperAssemblyPath] = wrapperAssembly;
                 }
-
+                
                 // 从 Wrapper 程序集中找到对应的类型
                 Type wrapperType = wrapperAssembly.GetType(typeFullName);
                 if (wrapperType == null)
@@ -49,24 +50,24 @@ namespace FastScriptReload.Editor
                 }
 
                 // 获取 Wrapper 类型中的所有静态方法（公有和私有）
-                var wrapperMethods = wrapperType.GetAllMethods();
-                foreach (var (methodName, methodDiffInfo) in result.ModifiedMethods)
+                var wrapperMethods = wrapperType.GetAllMethods(_assemblyDefinition.MainModule);
+                foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
                 {
-                    if (!hookTypeInfo.ModifiedMethods.TryGetValue(methodName, out var modifiedMethod))
+                    if (!result.AddedMethods.ContainsKey(methodName) && !result.ModifiedMethods.ContainsKey(methodName))
                     {
                         continue;
                     }
-
+                    
                     if (modifiedMethod.MethodDefinition.HasGenericParameters)
                     {
                         continue;
                     }
-
+                    
                     if (!wrapperMethods.TryGetValue(modifiedMethod.WrapperMethodName, out var wrapperMethod))
                     {
                         continue;
                     }
-
+                    
                     MethodHelper.DisableVisibilityChecks(wrapperMethod);
 
                     if (modifiedMethod.HookMethodState == HookMethodState.Added)
