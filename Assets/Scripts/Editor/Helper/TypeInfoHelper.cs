@@ -32,7 +32,7 @@ namespace FastScriptReload.Editor
         /// 解析选项
         /// </summary>
         private static CSharpParseOptions _parseOptions;
-        
+
         /// <summary>
         /// Assembly 名称 -> CSharpCompilation 的缓存
         /// </summary>
@@ -60,6 +60,16 @@ namespace FastScriptReload.Editor
         /// </summary>
         private static readonly ConcurrentDictionary<string, FileSnapshot> _fileSnapshots = new();
 
+        /// <summary>
+        /// 代码生成器缓存
+        /// </summary>
+        private static readonly List<IIncrementalGenerator> _sourceGenerators = new();
+
+        /// <summary>
+        /// 代码生成器 DLL 文件名(先写死)
+        /// </summary>
+        private const string SourceGeneratorDllName = "CSharpCodeAnalysis.dll";
+
         #endregion
 
         #region 公共查询接口
@@ -68,14 +78,17 @@ namespace FastScriptReload.Editor
         /// 初始化并构建所有索引
         /// </summary>
         public static void Initialize()
-        { 
+        {
             if (_isInitialized)
                 return;
-            
+
             _parseOptions = new CSharpParseOptions(
                 preprocessorSymbols: EditorUserBuildSettings.activeScriptCompilationDefines,
                 languageVersion: LanguageVersion.Latest
             );
+
+            // 加载代码生成器
+            LoadSourceGenerators();
 
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
@@ -152,7 +165,7 @@ namespace FastScriptReload.Editor
                 // 更新文件快照
                 var fileSnapshot = _fileSnapshots.GetValueOrDefault(filePath) ?? new FileSnapshot(filePath);
                 var newSyntaxTree = GetSyntaxTree(filePath);
-                
+
                 // 更新 CSharpCompilation 中的 SyntaxTree
                 if (fileSnapshot.SyntaxTree != null)
                 {
@@ -163,7 +176,7 @@ namespace FastScriptReload.Editor
                     // 如果是新文件，添加到编译中
                     compilation = compilation.AddSyntaxTrees(newSyntaxTree);
                 }
-                
+
                 fileSnapshot.SyntaxTree = newSyntaxTree;
             }
 
@@ -184,7 +197,7 @@ namespace FastScriptReload.Editor
             // 步骤1：收集所有 Added 和 Modified 的方法
             var modifyMethods = diffResults.Values
                 .SelectMany(diffResult => diffResult.AddedMethods.Values.Concat(diffResult.ModifiedMethods.Values)).ToArray();
-            
+
             if (modifyMethods.Length == 0)
             {
                 return;
@@ -228,7 +241,7 @@ namespace FastScriptReload.Editor
         public static HashSet<string> GetTypesFromFiles(IEnumerable<string> filePaths)
         {
             var types = new HashSet<string>();
-            
+
             foreach (var filePath in filePaths)
             {
                 // 从缓存中获取文件快照
@@ -237,14 +250,14 @@ namespace FastScriptReload.Editor
                     // 如果缓存中没有，尝试创建快照
                     fileSnapshot = GetOrCreateFileSnapshot(filePath);
                 }
-                
+
                 if (fileSnapshot?.SyntaxTree == null)
                     continue;
-                
+
                 // 从语法树中提取所有类型声明
                 var root = fileSnapshot.SyntaxTree.GetRoot();
                 var typeDeclarations = root.DescendantNodes().OfType<TypeDeclarationSyntax>();
-                
+
                 foreach (var typeDecl in typeDeclarations)
                 {
                     // 使用 RoslynHelper 扩展方法获取类型全名
@@ -255,7 +268,7 @@ namespace FastScriptReload.Editor
                     }
                 }
             }
-            
+
             return types;
         }
 
@@ -346,6 +359,7 @@ namespace FastScriptReload.Editor
             _methodCallGraph.Clear();
             _fileToAssembly.Clear();
             _fileSnapshots.Clear();
+            _sourceGenerators.Clear();
             _isInitialized = false;
 
             LoggerScoped.LogDebug("NewTypeInfoHelper 缓存已清除");
@@ -354,6 +368,55 @@ namespace FastScriptReload.Editor
         #endregion
 
         #region 私有实现方法
+
+        /// <summary>
+        /// 加载代码生成器
+        /// </summary>
+        private static void LoadSourceGenerators()
+        {
+            _sourceGenerators.Clear();
+
+            if (string.IsNullOrEmpty(SourceGeneratorDllName))
+            {
+                LoggerScoped.LogDebug("未配置代码生成器 DLL 名称，跳过代码生成器加载");
+                return;
+            }
+
+            // 使用 AssetDatabase 在 Unity 项目中查找 DLL 文件
+            string dllPath = null;
+            var guids = AssetDatabase.FindAssets(Path.GetFileNameWithoutExtension(SourceGeneratorDllName));
+            foreach (var guid in guids)
+            {
+                var assetPath = AssetDatabase.GUIDToAssetPath(guid);
+                if (assetPath.EndsWith(SourceGeneratorDllName, StringComparison.OrdinalIgnoreCase))
+                {
+                    dllPath = Path.GetFullPath(assetPath);
+                }
+            }
+
+            var generatorAssembly = System.Reflection.Assembly.LoadFile(dllPath);
+            var generatorTypes = new List<IIncrementalGenerator>();
+
+            foreach (var type in generatorAssembly.GetTypes())
+            {
+                if (type.IsNested || type.IsAbstract || type.IsInterface)
+                {
+                    continue;
+                }
+
+                if (typeof(IIncrementalGenerator).IsAssignableFrom(type))
+                {
+                    var generator = Activator.CreateInstance(type) as IIncrementalGenerator;
+                    if (generator != null)
+                    {
+                        generatorTypes.Add(generator);
+                        LoggerScoped.LogDebug($"加载代码生成器: {type.FullName}");
+                    }
+                }
+            }
+
+            _sourceGenerators.AddRange(generatorTypes);
+        }
 
         public static SyntaxTree GetSyntaxTree(string filePath)
         {
@@ -377,7 +440,7 @@ namespace FastScriptReload.Editor
 
             return syntaxTree;
         }
-        
+
         /// <summary>
         /// 获取或创建文件快照
         /// </summary>
@@ -459,8 +522,17 @@ namespace FastScriptReload.Editor
                 )
             );
 
-            // 缓存
-            _assemblyCompilations[assembly.name] = compilation;
+            // 如果存在代码生成器，使用 GeneratorDriver 运行它们
+            if (_sourceGenerators.Count > 0)
+            {
+                var driver = CSharpGeneratorDriver.Create(_sourceGenerators.ToArray());
+                driver.RunGeneratorsAndUpdateCompilation(compilation, out Microsoft.CodeAnalysis.Compilation newCompilation, out var diagnostics);
+                _assemblyCompilations[assembly.name] = (newCompilation as CSharpCompilation);
+            }
+            else
+            {
+                _assemblyCompilations[assembly.name] = compilation;
+            }
 
             // 存储文件路径到 Assembly 名称的映射
             foreach (var filePath in filePaths)
@@ -513,12 +585,12 @@ namespace FastScriptReload.Editor
                     if (instruction.Operand is GenericInstanceMethod calledMethodRef)
                     {
                         // 过滤掉一些不需要记录的方法
-                        if (calledMethodRef.DeclaringType.Scope.Name.Contains("System") 
+                        if (calledMethodRef.DeclaringType.Scope.Name.Contains("System")
                             || calledMethodRef.DeclaringType.Scope.Name.Contains("UnityEngine"))
                         {
                             continue;
                         }
-                        
+
                         var calledMethodName = calledMethodRef.ElementMethod.FullName;
 
                         // 添加到调用图索引
@@ -531,7 +603,7 @@ namespace FastScriptReload.Editor
                         if (!callers.ContainsKey(methodDef.FullName))
                         {
                             callers.Add(methodDef.FullName, new GenericMethodCallInfo(methodDef));
-                        } 
+                        }
                     }
                 }
             }
@@ -561,12 +633,12 @@ namespace FastScriptReload.Editor
             }
 
             var namespaceName = (namespaceDecl as BaseNamespaceDeclarationSyntax)?.Name.ToString() ?? string.Empty;
-            
+
             if (string.IsNullOrEmpty(namespaceName))
             {
                 return string.Join(".", parts);
             }
-            
+
             var builder = new StringBuilder(namespaceName.Length + parts.Count * 20);
             builder.Append(namespaceName);
             builder.Append('.');
@@ -601,7 +673,7 @@ public class FileSnapshot
  {
      public readonly string TypeName;
      public readonly string MethodName;
-     
+
      public readonly MethodDefinition MethodDef;
 
      public GenericMethodCallInfo(string typeName, string methodName)
