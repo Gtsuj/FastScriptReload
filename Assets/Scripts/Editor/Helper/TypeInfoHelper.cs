@@ -394,6 +394,11 @@ namespace FastScriptReload.Editor
                 }
             }
 
+            if (dllPath == null)
+            {
+                return;
+            }
+
             var generatorAssembly = System.Reflection.Assembly.LoadFile(dllPath);
             var generatorTypes = new List<IIncrementalGenerator>();
 
