@@ -168,7 +168,8 @@ namespace FastScriptReload.Editor
                 bool isTaskStateMachine = TypeInfoHelper.TypeIsTaskStateMachine(typeDef);
                 foreach (var methodDef in typeDef.Methods.ToArray())
                 {
-                    if (isTaskStateMachine || nestedTypeInfo.Methods.Contains(methodDef.FullName))
+                    if (isTaskStateMachine || nestedTypeInfo.Methods.Contains(methodDef.FullName)
+                                           || methodDef.FullName.Contains("ctor"))
                     {
                         HandleMethodDefinition(methodDef);
                     }
