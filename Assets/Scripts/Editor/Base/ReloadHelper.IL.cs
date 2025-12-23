@@ -479,15 +479,15 @@ namespace FastScriptReload.Editor
                     case Code.Ldfld:
                     case Code.Ldsfld:
                         ReplaceFieldLoadWithGetHolder(processor, fieldRef, code is Code.Ldsfld);
-                        break;
+                        return;
                     case Code.Stfld:
                     case Code.Stsfld:
                         ReplaceFieldStoreWithGetHolder(processor, fieldRef, code is Code.Stsfld);
-                        break;
+                        return;
                     case Code.Ldflda:
                     case Code.Ldsflda:
                         ReplaceFieldAddressWithGetRef(processor, fieldRef, code is Code.Ldsflda);
-                        break;
+                        return;
                 }
             }
 
