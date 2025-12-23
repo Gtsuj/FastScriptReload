@@ -23,7 +23,7 @@ namespace FastScriptReload.Editor
         public static Dictionary<string, DiffResult> CompileAndDiff(string assemblyName, List<string> files)
         {
             TypeInfoHelper.UpdateSyntaxTrees(assemblyName, files);
-        
+
             if (TypeInfoHelper.CloneAndCompile(assemblyName) == null)
             {
                 return null;
@@ -56,7 +56,7 @@ namespace FastScriptReload.Editor
                 LoggerScoped.LogDebug($"改动文件中没有找到类型定义");
                 return null;
             }
-            
+
             var diffResults = new Dictionary<string, DiffResult>();
 
             // 对比改动文件中的类型
@@ -64,7 +64,7 @@ namespace FastScriptReload.Editor
             {
                 // 从新旧程序集中查找类型定义
                 var newTypeDef = newAssemblyDef.MainModule.GetType(typeFullName);
-                var oldTypeDef = oldAssemblyDef.MainModule.GetType(typeFullName);;
+                var oldTypeDef = oldAssemblyDef.MainModule.GetType(typeFullName);
 
                 if (newTypeDef == null)
                 {
@@ -110,9 +110,9 @@ namespace FastScriptReload.Editor
                 // 对比类型差异
                 diffResult = CompareTypesWithCecil(oldTypeDef, newTypeDef, typeFullName);
 
-                if (diffResult != null && 
-                    (diffResult.AddedMethods.Count > 0 || 
-                     diffResult.ModifiedMethods.Count > 0 || 
+                if (diffResult != null &&
+                    (diffResult.AddedMethods.Count > 0 ||
+                     diffResult.ModifiedMethods.Count > 0 ||
                      diffResult.AddedFields.Count > 0))
                 {
                     diffResults[typeFullName] = diffResult;
@@ -123,7 +123,7 @@ namespace FastScriptReload.Editor
             {
                 return null;
             }
-            
+
             TypeInfoHelper.UpdateMethodCallGraph(diffResults);
 
             // 如果泛型方法被修改，将泛型方法的调用者加入修改列表
@@ -311,7 +311,7 @@ namespace FastScriptReload.Editor
                 // 操作码不同，操作数不同
                 return false;
             }
-            
+
             // 如果都没有操作数，认为相同
             if (existingInst.Operand == null && newInst.Operand == null)
             {
@@ -338,7 +338,7 @@ namespace FastScriptReload.Editor
                     return Mathf.Approximately(existingFloat, newFloat);
 
                 case double existingDouble when newInst.Operand is double newDouble:
-                    return existingDouble == newDouble;
+                    return existingDouble.Equals(newDouble);
 
                 case string existingString when newInst.Operand is string newString:
                     return existingString == newString;
@@ -351,19 +351,15 @@ namespace FastScriptReload.Editor
                 // 对于类型引用、方法引用等，比较它们的全名而不是元数据令牌
                 case TypeReference existingTypeRef when newInst.Operand is TypeReference newTypeRef:
                     return existingTypeRef.FullName == newTypeRef.FullName;
-                
+
                 case ParameterDefinition existingParamDef when newInst.Operand is ParameterDefinition newParamDef:
                     return existingParamDef.ParameterType.FullName == newParamDef.ParameterType.FullName;
 
                 case MethodDefinition existingMethodDef when newInst.Operand is MethodDefinition newMethodDef:
-                    if (existingMethodDef.DeclaringType.IsNested)
-                    {
-                        return CompareMethodDefinitions(existingMethodDef, newMethodDef);
-                    }
-                    return existingMethodDef.FullName == newMethodDef.FullName;
+                    return CompareMethodDefinitionOperands(existingMethodDef, newMethodDef);
 
                 case MethodReference existingMethodRef when newInst.Operand is MethodReference newMethodRef:
-                    return existingMethodRef.FullName == newMethodRef.FullName;
+                    return CompareMethodReferenceOperands(existingMethodRef, newMethodRef);
 
                 case FieldReference existingFieldRef when newInst.Operand is FieldReference newFieldRef:
                     return existingFieldRef.FullName == newFieldRef.FullName;
@@ -373,10 +369,10 @@ namespace FastScriptReload.Editor
                     // 跳转目标可能不同，但跳转的逻辑应该相同
                     // 这里简化处理：如果操作码相同，认为跳转逻辑相同
                     return true;
-                
+
                 case VariableDefinition existingVar when newInst.Operand is VariableDefinition newVar:
                     return existingVar.VariableType.FullName == newVar.VariableType.FullName;
-                
+
                 case Instruction existingSubInst when newInst.Operand is Instruction newSubInst:
                     return CompareOperands(existingSubInst, newSubInst);
 
@@ -395,11 +391,66 @@ namespace FastScriptReload.Editor
                     }
 
                     return true;
-                
+
                 default:
                     // 其他类型，使用默认比较
                     return existingInst.Operand.Equals(newInst.Operand);
             }
+        }
+
+        /// <summary>
+        /// 比较两个 MethodDefinition 操作数是否相同
+        /// </summary>
+        /// <param name="existingMethodDef">现有的方法定义</param>
+        /// <param name="newMethodDef">新的方法定义</param>
+        /// <returns>true 表示操作数相同，false 表示操作数不同</returns>
+        private static bool CompareMethodDefinitionOperands(MethodDefinition existingMethodDef, MethodDefinition newMethodDef)
+        {
+            if (existingMethodDef.FullName != newMethodDef.FullName)
+            {
+                return false;
+            }
+
+            if (existingMethodDef.DeclaringType.IsNested)
+            {
+                return CompareMethodDefinitions(existingMethodDef, newMethodDef);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 比较两个 MethodReference 操作数是否相同
+        /// </summary>
+        /// <param name="existingMethodRef">现有的方法引用</param>
+        /// <param name="newMethodRef">新的方法引用</param>
+        /// <returns>true 表示操作数相同，false 表示操作数不同</returns>
+        private static bool CompareMethodReferenceOperands(MethodReference existingMethodRef, MethodReference newMethodRef)
+        {
+            // 先比较 FullName 是否一致
+            if (existingMethodRef.FullName != newMethodRef.FullName)
+            {
+                return false;
+            }
+
+            // FullName 一致时，检查是否是Task状态机调用
+            if (TypeInfoHelper.IsTaskCallStartMethod(existingMethodRef))
+            {
+                // 查找状态机类型的 MoveNext 方法
+                var existingMoveNext = TypeInfoHelper.FindTaskCallMethod(existingMethodRef);
+                var newMoveNext = TypeInfoHelper.FindTaskCallMethod(newMethodRef);
+
+                // 比较 MoveNext 方法定义
+                var res = CompareMethodDefinitions(existingMoveNext, newMoveNext);
+                if (!res)
+                {
+                    NestedTypeInfo.AddMethod(newMoveNext);
+                }
+
+                return res;
+            }
+
+            return true;
         }
     }
 }
@@ -455,7 +506,7 @@ public class FieldDiffInfo
     /// 声明类型全名
     /// </summary>
     public string DeclaringTypeFullName { get; set; }
-        
+
     /// <summary>
     /// 字段全名
     /// </summary>

@@ -342,6 +342,38 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
+        /// 检查是否是Task调用
+        /// </summary>
+        public static bool IsTaskCallStartMethod(MethodReference methodRef)
+        {
+            return (methodRef.DeclaringType.FullName.Contains("System.Runtime.CompilerServices.AsyncTaskMethodBuilder")
+                    || methodRef.DeclaringType.FullName.Contains("Cysharp.Threading.Tasks.CompilerServices.AsyncUniTaskMethodBuilder"))
+                && methodRef.Name.Equals("Start");
+        }
+
+        /// <summary>
+        /// 查找Task调用的方法
+        /// </summary>
+        public static MethodDefinition FindTaskCallMethod(MethodReference methodRef)
+        {
+            // 提取状态机类型并比较 MoveNext 方法
+            TypeDefinition stateMachineType = (methodRef as GenericInstanceMethod)?.GenericArguments[0] as TypeDefinition;
+
+            if (stateMachineType == null || !stateMachineType.HasMethods)
+                return null;
+
+            return stateMachineType.Methods.FirstOrDefault(m => m.Name == "MoveNext");
+        }
+
+        /// <summary>
+        /// 检查类型是否是Task状态机
+        /// </summary>
+        public static bool TypeIsTaskStateMachine(TypeDefinition typeDef)
+        {
+            return typeDef.Interfaces.Any(implementation => implementation.InterfaceType.FullName.Equals("System.Runtime.CompilerServices.IAsyncStateMachine"));
+        }
+
+        /// <summary>
         /// 清除所有缓存
         /// </summary>
         public static void Clear()
@@ -423,7 +455,7 @@ namespace FastScriptReload.Editor
             _sourceGenerators.AddRange(generatorTypes);
         }
 
-        public static SyntaxTree GetSyntaxTree(string filePath)
+        private static SyntaxTree GetSyntaxTree(string filePath)
         {
             if (string.IsNullOrEmpty(filePath))
             {
