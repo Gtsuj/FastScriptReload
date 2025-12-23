@@ -137,6 +137,11 @@ namespace FastScriptReload.Editor
                     }
 
                     var callers = TypeInfoHelper.FindMethodCallers(methodName);
+                    if (callers == null)
+                    {
+                        continue;
+                    }
+                    
                     foreach (var (callerMethodName, methodCallInfo) in callers)
                     {
                         if (!diffResults.TryGetValue(methodCallInfo.TypeName, out var callerDiffResult))
