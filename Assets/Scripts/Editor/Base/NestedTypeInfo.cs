@@ -5,15 +5,15 @@ namespace FastScriptReload.Editor
 {
     public class NestedTypeInfo
     {
-        public TypeDefinition TypeDefinition { get; }
-        
-        public HashSet<MethodReference> Methods { get; } = new ();
-        
-        public HashSet<FieldReference> Fields { get; } = new ();
+        public string NestedTypeName { get; }
 
-        public NestedTypeInfo(TypeDefinition typeDef)
+        public HashSet<string> Methods { get; } = new ();
+
+        public HashSet<string> Fields { get; } = new ();
+
+        public NestedTypeInfo(string nestedTypeName)
         {
-            TypeDefinition = typeDef;
+            NestedTypeName = nestedTypeName;
         }
 
         public static Dictionary<string, NestedTypeInfo> NestedTypeInfos = new();
@@ -28,11 +28,11 @@ namespace FastScriptReload.Editor
             var fullName = methodRef.DeclaringType.FullName;
             if (!NestedTypeInfos.TryGetValue(fullName, out var nestedTypeInfo))
             {
-                nestedTypeInfo = new NestedTypeInfo(typeDef);
+                nestedTypeInfo = new NestedTypeInfo(typeDef.FullName);
                 NestedTypeInfos[fullName] = nestedTypeInfo;
             }
 
-            nestedTypeInfo.Methods.Add(methodRef);
+            nestedTypeInfo.Methods.Add(methodRef.FullName);
         }
 
         public static void AddField(FieldReference fieldRef)
@@ -45,11 +45,11 @@ namespace FastScriptReload.Editor
             var fullName = fieldRef.DeclaringType.FullName;
             if (!NestedTypeInfos.TryGetValue(fullName, out var nestedTypeInfo))
             {
-                nestedTypeInfo = new NestedTypeInfo(typeDef);
+                nestedTypeInfo = new NestedTypeInfo(typeDef.FullName);
                 NestedTypeInfos[fullName] = nestedTypeInfo;
             }
 
-            nestedTypeInfo.Fields.Add(fieldRef);
+            nestedTypeInfo.Fields.Add(fieldRef.FullName);
         }
 
         public static void Clear()

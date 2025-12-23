@@ -106,13 +106,13 @@ namespace FastScriptReload.Editor
                         }
 
                         var hookMethodName = methodDef.FullName;
-                        
+
                         // 复制完整的方法定义，包括方法体
                         var newMethodDef = CopyMethod(methodDef, mainModule.ImportReference(originalType));
-                        
+
                         if (!hookTypeInfo.ModifiedMethods.TryGetValue(hookMethodName, out var hookMethodInfo))
                         {
-                            
+
                             hookMethodInfo = new HookMethodInfo(newMethodDef, hookMethodState, originalMethods.GetValueOrDefault(hookMethodName));
                             hookTypeInfo.ModifiedMethods.Add(hookMethodName, hookMethodInfo);
                         }
@@ -120,7 +120,7 @@ namespace FastScriptReload.Editor
                         {
                             hookMethodInfo.MethodDefinition = newMethodDef;
                         }
-                        
+
                         typeDef.Methods.Add(newMethodDef);
                     }
                 }
@@ -129,7 +129,7 @@ namespace FastScriptReload.Editor
                 PreRegisterMethods(result.AddedMethods, HookMethodState.Added);
                 PreRegisterMethods(result.ModifiedMethods, HookMethodState.Modified);
             }
-            
+
             // 处理方法引用
             foreach (var typeDef in mainModule.Types)
             {
@@ -159,14 +159,16 @@ namespace FastScriptReload.Editor
                 HandleMethod(result.AddedMethods);
                 HandleMethod(result.ModifiedMethods);
             }
-            
+
             // 处理内部类
-            foreach (var (_, nestedTypeInfo) in NestedTypeInfo.NestedTypeInfos.ToArray())
+            foreach (var (nestedTypeName, nestedTypeInfo) in NestedTypeInfo.NestedTypeInfos)
             {
-                var typeDef = nestedTypeInfo.TypeDefinition;
+                var typeDef = mainModule.GetType(nestedTypeName);
+                // 内部类是Task生成出来的状态机，则保留整个内部类
+                bool isTaskStateMachine = TypeInfoHelper.TypeIsTaskStateMachine(typeDef);
                 foreach (var methodDef in typeDef.Methods.ToArray())
                 {
-                    if (nestedTypeInfo.Methods.Contains(methodDef))
+                    if (isTaskStateMachine || nestedTypeInfo.Methods.Contains(methodDef.FullName))
                     {
                         HandleMethodDefinition(methodDef);
                     }
@@ -178,7 +180,7 @@ namespace FastScriptReload.Editor
 
                 foreach (var fieldDef in typeDef.Fields.ToArray())
                 {
-                    if (nestedTypeInfo.Fields.Contains(fieldDef))
+                    if (isTaskStateMachine || nestedTypeInfo.Fields.Contains(fieldDef.FullName))
                     {
                         fieldDef.DeclaringType = (TypeDefinition)GetOriginalType(fieldDef.DeclaringType);
                         fieldDef.FieldType = GetOriginalType(fieldDef.FieldType);
@@ -200,7 +202,7 @@ namespace FastScriptReload.Editor
 
             // 清理编译器生成的特性
             var compilerNamespaces = new[] { "System.Runtime.CompilerServices", "Microsoft.CodeAnalysis"  };
-            
+
             void CleanupAttributesByNamespace(ICollection<CustomAttribute> attributes)
             {
                 foreach (var attr in attributes.ToArray())
@@ -212,7 +214,7 @@ namespace FastScriptReload.Editor
                     }
                 }
             }
-            
+
             CleanupAttributesByNamespace(mainModule.CustomAttributes);
             CleanupAttributesByNamespace(mainModule.Assembly.CustomAttributes);
 
@@ -259,7 +261,7 @@ namespace FastScriptReload.Editor
                         typeDef.NestedTypes.RemoveAt(i);
                     }
                 }
-                
+
                 typeDef.Properties.Clear();
                 typeDef.Events.Clear();
             }
@@ -304,12 +306,12 @@ namespace FastScriptReload.Editor
             }
 
             newMethodDef.Body.MaxStackSize = methodDef.Body.MaxStackSize;
-            
+
             if (!methodDef.HasBody)
             {
                 return newMethodDef;
             }
-            
+
             // 复制局部变量定义
             foreach (var variable in methodDef.Body.Variables)
             {
@@ -360,7 +362,7 @@ namespace FastScriptReload.Editor
 
             processor.Append(sourceInst);
         }
-        
+
         /// <summary>
         /// 处理方法引用
         /// </summary>
@@ -402,13 +404,13 @@ namespace FastScriptReload.Editor
             var instructions = methodDef.Body.Instructions.ToArray();
             var processor = methodDef.Body.GetILProcessor();
             processor.Clear();
-            
+
             for (int i = 0; i < instructions.Length; i++)
             {
                 HandleInstructionRef(processor, instructions[i]);
             }
         }
-        
+
         /// <summary>
         /// 处理方法的引用
         /// </summary>
@@ -425,7 +427,7 @@ namespace FastScriptReload.Editor
                 }
 
                 // 处理泛型方法调用
-                if (methodRef is GenericInstanceMethod genericMethod 
+                if (methodRef is GenericInstanceMethod genericMethod
                     && hookType.ModifiedMethods.TryGetValue(methodRef.GetElementMethod().FullName, out var modifiedMethodInfo))
                 {
                     var genericInstanceMethod = CreateGenericInstanceMethod(genericMethod, modifiedMethodInfo.MethodDefinition);
@@ -492,10 +494,14 @@ namespace FastScriptReload.Editor
             if (fieldRef.DeclaringType.IsNested)
             {
                 NestedTypeInfo.AddField(fieldRef);
+                processor.Append(inst);
+                return;
             }
 
             // 普通字段引用处理
-            inst.Operand = new FieldReference(fieldRef.Name, GetOriginalType(fieldRef.FieldType), GetOriginalType(fieldRef.DeclaringType));
+            var module = fieldRef.Module;
+            var newField = module.ImportReference(new FieldReference(fieldRef.Name, GetOriginalType(fieldRef.FieldType), GetOriginalType(fieldRef.DeclaringType)));
+            inst.Operand = newField;
             processor.Append(inst);
         }
 
@@ -536,7 +542,7 @@ namespace FastScriptReload.Editor
             processor.Append(Instruction.Create(OpCodes.Ldstr, fieldRef.Name));
             processor.Append(Instruction.Create(OpCodes.Call, storeMethodRef));
         }
-        
+
         /// <summary>
         /// 替换 ldflda/ldsflda 指令为 FieldResolver.GetHolder + FieldHolder.GetRef 调用
         /// 实例字段：ref instance.Field → GetHolder(instance, "Field").GetRef()
@@ -576,14 +582,14 @@ namespace FastScriptReload.Editor
             var module = typeRef.Module;
 
             TypeReference originalTypeRef = null;
-            
+
             // 定义不在当前程序集的之前返回
             if (typeRef.Scope.Name.Equals(module.Name)
                 && ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeRef.FullName, out var originalType))
             {
                 originalTypeRef = module.ImportReference(originalType);
             }
-            
+
             if (typeRef is GenericInstanceType genericInstanceType)
             {
                 TypeReference[] genericArguments = new TypeReference[genericInstanceType.GenericArguments.Count];
@@ -592,7 +598,7 @@ namespace FastScriptReload.Editor
                 {
                     genericArguments[i] = GetOriginalType(genericInstanceType.GenericArguments[i]);
                 }
-                
+
                 GenericInstanceType originalGenericInstanceType =
                     (originalTypeRef ?? typeRef.GetElementType()).MakeGenericInstanceType(genericArguments);
 
@@ -615,7 +621,7 @@ namespace FastScriptReload.Editor
                 var declaringTypeName = methodRef.DeclaringType.IsGenericInstance
                     ? methodRef.DeclaringType.GetElementType().FullName
                     : methodRef.DeclaringType.FullName;
-                
+
                 // 从原类型中获取方法引用
                 if (methodRef.DeclaringType.Scope.Name.Equals(module.Name)
                     && ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(declaringTypeName, out var originalType))
@@ -638,7 +644,7 @@ namespace FastScriptReload.Editor
                 {
                     return CreateGenericInstanceMethod(genericInstanceMethod1, null);
                 }
-                
+
                 if (methodRef.DeclaringType is GenericInstanceType genericInstanceType)
                 {
                     for (int i = 0; i < genericInstanceType.GenericArguments.Count; i++)
@@ -651,7 +657,7 @@ namespace FastScriptReload.Editor
                 {
                     param.ParameterType = GetOriginalType(param.ParameterType);
                 }
-                
+
                 return methodRef;
             }
             catch (Exception ex)
