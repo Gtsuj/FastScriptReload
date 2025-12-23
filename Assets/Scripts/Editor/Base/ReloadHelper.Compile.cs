@@ -217,8 +217,8 @@ namespace FastScriptReload.Editor
             }
 
             // 比较字段：找出新增的字段
-            var oldFieldMap = oldTypeDef.Fields.ToDictionary(f => f.Name, f => f);
-            var newFieldMap = newTypeDef.Fields.ToDictionary(f => f.Name, f => f);
+            var oldFieldMap = oldTypeDef.Fields.ToDictionary(f => f.FullName, f => f);
+            var newFieldMap = newTypeDef.Fields.ToDictionary(f => f.FullName, f => f);
 
             foreach (var (fieldName, newFieldDef) in newFieldMap)
             {
