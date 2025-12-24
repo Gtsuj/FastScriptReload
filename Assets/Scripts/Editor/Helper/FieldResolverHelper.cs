@@ -1,4 +1,6 @@
-﻿using System.Linq;
+﻿using System;
+using System.Linq;
+using System.Reflection;
 using FastScriptReload.Runtime;
 using Mono.Cecil;
 using UnityEngine;
@@ -135,5 +137,46 @@ namespace FastScriptReload.Editor
 
             return methodRef;
         }
+
+        #region 运行时反射调用接口
+
+        /// <summary>
+        /// 通过反射注册字段初始化器 - 使用固定初始值
+        /// </summary>
+        /// <param name="ownerType">字段所属的类型</param>
+        /// <param name="fieldName">字段名称</param>
+        /// <param name="fieldType">字段类型</param>
+        /// <param name="initialValue">初始值</param>
+        public static void RegisterFieldInitializer(Type ownerType, string fieldName, Type fieldType, object initialValue)
+        {
+            if (ownerType == null)
+            {
+                throw new ArgumentNullException(nameof(ownerType));
+            }
+
+            if (string.IsNullOrEmpty(fieldName))
+            {
+                throw new ArgumentException("字段名称不能为空", nameof(fieldName));
+            }
+
+            if (fieldType == null)
+            {
+                throw new ArgumentNullException(nameof(fieldType));
+            }
+
+            // 构造 FieldResolver<TOwner> 类型
+            var fieldResolverType = typeof(FieldResolver<>).MakeGenericType(ownerType);
+
+            // 获取 RegisterFieldInitializer<TField> 方法（使用固定值的重载）
+            var methodInfo = fieldResolverType.GetMethod("RegisterFieldInitializer");
+
+            // 创建泛型方法实例
+            var genericMethod = methodInfo.MakeGenericMethod(fieldType);
+
+            // 调用方法
+            genericMethod.Invoke(null, new object[] { fieldName, initialValue });
+        }
+
+        #endregion
     }
 }

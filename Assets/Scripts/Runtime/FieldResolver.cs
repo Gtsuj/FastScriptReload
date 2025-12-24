@@ -75,6 +75,55 @@ namespace FastScriptReload.Runtime
         /// </summary>
         private static readonly Dictionary<string, Func<object>> _fieldInitializers = new ();
         
+        /// <summary>
+        /// 注册字段初始化器 - 使用固定初始值
+        /// 当字段首次被访问时，会使用此值作为初始值
+        /// </summary>
+        /// <typeparam name="TField">字段类型</typeparam>
+        /// <param name="fieldName">字段名称</param>
+        /// <param name="initialValue">初始值</param>
+        public static void RegisterFieldInitializer<TField>(string fieldName, TField initialValue)
+        {
+            if (string.IsNullOrEmpty(fieldName))
+            {
+                throw new ArgumentException("字段名称不能为空", nameof(fieldName));
+            }
+            
+            lock (_fieldInitializers)
+            {
+                // 将泛型 Func<TField> 转换为 Func<object>
+                _fieldInitializers[fieldName] = () => initialValue;
+            }
+        }
+
+        /// <summary>
+        /// 移除字段初始化器
+        /// </summary>
+        /// <param name="fieldName">字段名称</param>
+        /// <returns>是否成功移除</returns>
+        public static bool UnregisterFieldInitializer(string fieldName)
+        {
+            if (string.IsNullOrEmpty(fieldName))
+            {
+                return false;
+            }
+
+            lock (_fieldInitializers)
+            {
+                return _fieldInitializers.Remove(fieldName);
+            }
+        }
+
+        /// <summary>
+        /// 清除所有字段初始化器
+        /// </summary>
+        public static void ClearFieldInitializers()
+        {
+            lock (_fieldInitializers)
+            {
+                _fieldInitializers.Clear();
+            }
+        }
 
         /// <summary>
         /// 获取字段持有者 - 核心方法
