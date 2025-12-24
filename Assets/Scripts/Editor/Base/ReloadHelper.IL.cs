@@ -3,11 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using FastScriptReload.Runtime;
-using ImmersiveVRTools.Runtime.Common.Extensions;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
-using Mono.Cecil.Pdb;
 using Mono.Cecil.Rocks;
 using Code = Mono.Cecil.Cil.Code;
 using MethodAttributes = Mono.Cecil.MethodAttributes;
@@ -112,7 +110,6 @@ namespace FastScriptReload.Editor
 
                         if (!hookTypeInfo.ModifiedMethods.TryGetValue(hookMethodName, out var hookMethodInfo))
                         {
-
                             hookMethodInfo = new HookMethodInfo(newMethodDef, hookMethodState, originalMethods.GetValueOrDefault(hookMethodName));
                             hookTypeInfo.ModifiedMethods.Add(hookMethodName, hookMethodInfo);
                         }
@@ -281,6 +278,8 @@ namespace FastScriptReload.Editor
                 MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, methodDef.ReturnType)
             {
                 DeclaringType = methodDef.DeclaringType,
+                IsSpecialName = methodDef.IsSpecialName,
+                IsRuntimeSpecialName = methodDef.IsRuntimeSpecialName,
             };
 
             newMethodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
@@ -340,7 +339,7 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 创建指令
         /// </summary>
-        private static void HandleInstructionRef(ILProcessor processor, Instruction sourceInst)
+        private static void HandleInstruction(ILProcessor processor, Instruction sourceInst, bool methodDefIsConstructor)
         {
             if (sourceInst.Operand == null)
             {
@@ -353,8 +352,8 @@ namespace FastScriptReload.Editor
                 case TypeReference typeRef:
                     sourceInst.Operand = GetOriginalType(typeRef);
                     break;
-                case FieldReference fieldRef:
-                    HandleFieldReference(processor, sourceInst, fieldRef);
+                case FieldReference:
+                    HandleFieldReference(processor, sourceInst, methodDefIsConstructor);
                     return;
                 case MethodReference methodRef:
                     sourceInst.Operand = HandleMethodReference(methodRef);
@@ -408,7 +407,7 @@ namespace FastScriptReload.Editor
 
             for (int i = 0; i < instructions.Length; i++)
             {
-                HandleInstructionRef(processor, instructions[i]);
+                HandleInstruction(processor, instructions[i], methodDef.IsConstructor);
             }
         }
 
@@ -467,8 +466,14 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 处理字段引用指令
         /// </summary>
-        private static void HandleFieldReference(ILProcessor processor, Instruction inst, FieldReference fieldRef)
+        private static void HandleFieldReference(ILProcessor processor, Instruction inst, bool methodDefIsConstructor)
         {
+            var fieldRef = inst.Operand as FieldReference;
+            if (fieldRef == null)
+            {
+                return;
+            }
+
             // 处理新增字段的访问
             if (HookTypeInfoCache.TryGetValue(fieldRef.DeclaringType.FullName, out var hookTypeInfo)
                 && hookTypeInfo.AddedFields.ContainsKey(fieldRef.FullName))
@@ -482,6 +487,13 @@ namespace FastScriptReload.Editor
                         return;
                     case Code.Stfld:
                     case Code.Stsfld:
+                        if (methodDefIsConstructor 
+                            && ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(fieldRef.DeclaringType.FullName, out var ownerType))
+                        {
+                            var fieldValue = inst.Previous.Operand;
+                            var fieldType = fieldValue.GetType();
+                            FieldResolverHelper.RegisterFieldInitializer(ownerType, fieldRef.Name, fieldType, fieldValue);
+                        }
                         ReplaceFieldStoreWithGetHolder(processor, fieldRef, code is Code.Stsfld);
                         return;
                     case Code.Ldflda:
