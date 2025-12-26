@@ -24,7 +24,7 @@ namespace FastScriptReload.Editor
         {
             TypeInfoHelper.UpdateSyntaxTrees(assemblyName, files);
 
-            if (TypeInfoHelper.CloneAndCompile(assemblyName) == null)
+            if (TypeInfoHelper.Compile(assemblyName) == null)
             {
                 return null;
             }

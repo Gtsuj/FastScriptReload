@@ -9,6 +9,7 @@ using ImmersiveVrToolsCommon.Runtime.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Emit;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using UnityEditor;
@@ -17,13 +18,14 @@ using UnityEngine;
 
 namespace FastScriptReload.Editor
 {
-    /// <summary>
-    /// 新的类型信息辅助类
-    /// - 按 Assembly 缓存 CSharpCompilation（只缓存 Application.dataPath 下的程序集）
-    /// - 使用 Mono.Cecil 缓存方法调用信息
-    /// </summary>
     public static class TypeInfoHelper
     {
+        public static readonly EmitOptions EMIT_OPTIONS = new (debugInformationFormat:DebugInformationFormat.PortablePdb);
+        
+        public static WriterParameters WriterParameters => new() { WriteSymbols = true, SymbolWriterProvider = new PortablePdbWriterProvider() };
+
+        public static ReaderParameters ReaderParameters => new() { ReadWrite = true, InMemory = true };
+        
         #region 私有字段
 
         private static bool _isInitialized;
@@ -41,7 +43,7 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// Assembly 名称 -> AssemblyDefinition 列表的缓存（用于 Mono.Cecil 分析）
         /// </summary>
-        private static readonly ConcurrentDictionary<string, List<AssemblyDefinition>> _assemblyDefinitions = new();
+        private static readonly Dictionary<string, List<AssemblyDefinition>> _assemblyDefinitions = new();
 
         /// <summary>
         /// 方法调用图索引：方法签名 -> 调用者方法信息集合
@@ -77,7 +79,7 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 初始化并构建所有索引
         /// </summary>
-        public static void Initialize()
+        public static async void Initialize()
         {
             if (_isInitialized)
                 return;
@@ -99,31 +101,34 @@ namespace FastScriptReload.Editor
             var dataPathAssemblies = allAssemblies
                 .Where(assembly => assembly.sourceFiles.All(sourceFile => sourceFile.StartsWith("Assets"))).ToList();
 
-            // 并行处理每个程序集
-            Parallel.ForEach(dataPathAssemblies, assembly =>
+            List<Task> tasks = new();
+            foreach (var assembly in dataPathAssemblies)
             {
                 try
                 {
                     // 先加载 AssemblyDefinition
                     if (string.IsNullOrEmpty(assembly.outputPath) || !File.Exists(assembly.outputPath))
-                        return;
+                        continue;
 
                     var assemblyDef = AssemblyDefinition.ReadAssembly(
-                        assembly.outputPath,
-                        new ReaderParameters { ReadWrite = false, InMemory = true }
-                    );
+                        assembly.outputPath, new() { InMemory = true });
 
                     _assemblyDefinitions[assembly.name] = new List<AssemblyDefinition> { assemblyDef };
 
-                    // 构建 CSharpCompilation 和方法调用图
-                    BuildAssemblyCompilation(assembly);
-                    BuildMethodCallGraph(assemblyDef);
+                    var assemblyCopy = assembly;
+                    var assemblyDefCopy = assemblyDef;
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        await Task.WhenAll(BuildAssemblyCompilation(assemblyCopy), BuildMethodCallGraph(assemblyDefCopy));
+                    }));
                 }
                 catch (Exception ex)
                 {
                     LoggerScoped.LogWarning($"处理程序集 {assembly.name} 时出错: {ex.Message}");
                 }
-            });
+                
+            }
+            await Task.WhenAll(tasks);
 
             stopwatch.Stop();
             LoggerScoped.LogDebug($"TypeInfo 初始化完成，耗时: {stopwatch.ElapsedMilliseconds}ms, " +
@@ -230,7 +235,9 @@ namespace FastScriptReload.Editor
         /// <returns>调用者方法信息集合（类型名, 方法完整签名）</returns>
         public static Dictionary<string, GenericMethodCallInfo> FindMethodCallers(string methodFullName)
         {
-            return _methodCallGraph.GetValueOrDefault(methodFullName);
+            var callers = _methodCallGraph.GetValueOrDefault(methodFullName);
+            // 返回一个副本以保持线程安全和向后兼容
+            return callers != null ? new Dictionary<string, GenericMethodCallInfo>(callers) : null;
         }
 
         /// <summary>
@@ -301,7 +308,7 @@ namespace FastScriptReload.Editor
         /// <param name="assemblyName">程序集名称</param>
         /// <param name="isCache"></param>
         /// <returns>编译后的 AssemblyDefinition，如果编译失败返回 null</returns>
-        public static AssemblyDefinition CloneAndCompile(string assemblyName, bool isCache = true)
+        public static AssemblyDefinition Compile(string assemblyName, bool isCache = true)
         {
             var compilation = GetCompilation(assemblyName);
             if (compilation == null)
@@ -310,21 +317,18 @@ namespace FastScriptReload.Editor
                 return null;
             }
 
-            // 使用新的程序集名称（添加 GUID 确保唯一性）
-            compilation = compilation.WithAssemblyName($"{assemblyName}_{Guid.NewGuid()}");
-
             var ms = new MemoryStream();
-            var emitResult = compilation.Emit(ms, options: ReloadHelper.EMIT_OPTIONS);
+            var emitResult = compilation.Emit(ms, options: EMIT_OPTIONS);
 
             if (emitResult.Success)
             {
                 ms.Seek(0, SeekOrigin.Begin);
-                var assemblyDef = AssemblyDefinition.ReadAssembly(ms, ReloadHelper.ReaderParameters);
+                var assemblyDef = AssemblyDefinition.ReadAssembly(ms, ReaderParameters);
+                assemblyDef.Name.Name = $"{assemblyName}_{Guid.NewGuid()}";
 
-                // 添加到缓存列表
                 if (isCache)
                 {
-                    var list = _assemblyDefinitions.GetOrAdd(assemblyName, _ => new List<AssemblyDefinition>());
+                    var list = _assemblyDefinitions.GetValueOrDefault(assemblyName, new List<AssemblyDefinition>());
                     list.Add(assemblyDef);
                 }
 
@@ -371,30 +375,6 @@ namespace FastScriptReload.Editor
         public static bool TypeIsTaskStateMachine(TypeDefinition typeDef)
         {
             return typeDef.Interfaces.Any(implementation => implementation.InterfaceType.FullName.Equals("System.Runtime.CompilerServices.IAsyncStateMachine"));
-        }
-
-        /// <summary>
-        /// 清除所有缓存
-        /// </summary>
-        public static void Clear()
-        {
-            foreach (var assemblyDefList in _assemblyDefinitions.Values)
-            {
-                foreach (var assemblyDef in assemblyDefList)
-                {
-                    assemblyDef?.Dispose();
-                }
-            }
-
-            _assemblyCompilations.Clear();
-            _assemblyDefinitions.Clear();
-            _methodCallGraph.Clear();
-            _fileToAssembly.Clear();
-            _fileSnapshots.Clear();
-            _sourceGenerators.Clear();
-            _isInitialized = false;
-
-            LoggerScoped.LogDebug("NewTypeInfoHelper 缓存已清除");
         }
 
         #endregion
@@ -502,29 +482,39 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 为程序集构建 CSharpCompilation 并缓存
         /// </summary>
-        private static void BuildAssemblyCompilation(Assembly assembly)
+        private static async Task BuildAssemblyCompilation(Assembly assembly)
         {
-            var syntaxTrees = new List<SyntaxTree>();
-            var filePaths = new HashSet<string>();
+            // 使用 ConcurrentBag 来安全地收集语法树
+            var syntaxTrees = new ConcurrentBag<SyntaxTree>();
 
+            List<Task> tasks = new();
             // 收集程序集的所有源文件
             foreach (var sourceFile in assembly.sourceFiles)
             {
-                var fullPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", sourceFile));
-
-                if (!File.Exists(fullPath))
-                    continue;
-
-                // 获取或创建文件快照
-                var syntaxTree = GetOrCreateFileSnapshot(fullPath).SyntaxTree;
-                if (syntaxTree != null)
+                tasks.Add(Task.Run(() =>
                 {
-                    syntaxTrees.Add(syntaxTree);
-                    filePaths.Add(fullPath);
-                }
+                    var fullPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", sourceFile));
+
+                    if (!File.Exists(fullPath))
+                    {
+                        return;
+                    }
+
+                    // 获取或创建文件快照
+                    var syntaxTree = GetOrCreateFileSnapshot(fullPath)?.SyntaxTree;
+                    if (syntaxTree != null)
+                    {
+                        syntaxTrees.Add(syntaxTree);
+                        _fileToAssembly[fullPath] = assembly.name;
+                    }
+                }));
             }
 
-            if (syntaxTrees.Count == 0)
+            await Task.WhenAll(tasks);
+
+            // 将 ConcurrentBag 转换为 List（保持顺序）
+            var syntaxTreesList = syntaxTrees.ToList();
+            if (syntaxTreesList.Count == 0)
                 return;
 
             // 构建引用
@@ -550,12 +540,14 @@ namespace FastScriptReload.Editor
             // 创建 CSharpCompilation
             var compilation = CSharpCompilation.Create(
                 assemblyName: assembly.name,
-                syntaxTrees: syntaxTrees,
+                syntaxTrees: syntaxTreesList,
                 references: references,
                 options: new CSharpCompilationOptions(
                     OutputKind.DynamicallyLinkedLibrary,
                     optimizationLevel: OptimizationLevel.Debug,
-                    allowUnsafe: assembly.compilerOptions.AllowUnsafeCode
+                    allowUnsafe: assembly.compilerOptions.AllowUnsafeCode,
+                    concurrentBuild:true,
+                    deterministic:false
                 )
             );
 
@@ -570,24 +562,21 @@ namespace FastScriptReload.Editor
             {
                 _assemblyCompilations[assembly.name] = compilation;
             }
-
-            // 存储文件路径到 Assembly 名称的映射
-            foreach (var filePath in filePaths)
-            {
-                _fileToAssembly[filePath] = assembly.name;
-            }
         }
 
         /// <summary>
         /// 使用 Mono.Cecil 构建方法调用图
         /// </summary>
-        private static void BuildMethodCallGraph(AssemblyDefinition assemblyDef)
+        private static async Task BuildMethodCallGraph(AssemblyDefinition assemblyDef)
         {
             // 分析所有类型
+            List<Task> tasks = new();
             foreach (var type in assemblyDef.MainModule.Types)
             {
-                AnalyzeTypeForMethodCalls(type);
+                tasks.Add(Task.Run(() => AnalyzeTypeForMethodCalls(type)));
             }
+
+            await Task.WhenAll(tasks);
         }
 
         /// <summary>
@@ -690,11 +679,12 @@ namespace FastScriptReload.Editor
 /// <summary>
 /// 文件快照
 /// </summary>
+[Serializable]
 public class FileSnapshot
 {
-    public string FilePath { get; set; }
-    public SyntaxTree SyntaxTree { get; set; }
-    public DateTime SnapshotTime { get; set; }
+    public string FilePath;
+    public SyntaxTree SyntaxTree;
+    public DateTime SnapshotTime;
 
     public FileSnapshot(string path)
     {

@@ -34,12 +34,8 @@ namespace FastScriptReload.Editor
                 {
                     continue;
                 }
-
-                if (!AssemblyCache.TryGetValue(wrapperAssemblyPath, out var wrapperAssembly))
-                {
-                    wrapperAssembly = Assembly.LoadFrom(wrapperAssemblyPath);
-                    AssemblyCache[wrapperAssemblyPath] = wrapperAssembly;
-                }
+                
+                var wrapperAssembly = Assembly.LoadFrom(wrapperAssemblyPath);
                 
                 // 从 Wrapper 程序集中找到对应的类型
                 Type wrapperType = wrapperAssembly.GetType(typeFullName);

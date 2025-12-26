@@ -23,7 +23,8 @@ namespace FastScriptReload.Editor
 
         public static string ModifyCompileAssembly(string assemblyName, Dictionary<string, DiffResult> diffResults)
         {
-            _assemblyDefinition = TypeInfoHelper.CloneAndCompile(assemblyName, false);
+            // 编译一份新的用于修改
+            _assemblyDefinition = TypeInfoHelper.Compile(assemblyName, false);
 
             // 修改程序集
             HandleAssemblyType(diffResults);

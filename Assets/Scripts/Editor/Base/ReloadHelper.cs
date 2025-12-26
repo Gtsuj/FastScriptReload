@@ -24,14 +24,6 @@ namespace FastScriptReload.Editor
     /// </summary>
     public static partial class ReloadHelper
     {
-        public static readonly EmitOptions EMIT_OPTIONS = new (debugInformationFormat:DebugInformationFormat.PortablePdb);
-
-        public static WriterParameters WriterParameters => new()
-            { WriteSymbols = true, SymbolWriterProvider = new PortablePdbWriterProvider() };
-
-        public static ReaderParameters ReaderParameters => new()
-            { ReadWrite = true, InMemory = true };
-        
         private static string _assemblySavePath;
 
         public static string AssemblyPath
@@ -75,11 +67,6 @@ namespace FastScriptReload.Editor
         /// 修改过的类型缓存
         /// </summary>
         public static Dictionary<string, HookTypeInfo> HookTypeInfoCache = new();
-
-        /// <summary>
-        /// 全局缓存已加载的 Wrapper 程序集（按程序集名称索引）
-        /// </summary>
-        public static Dictionary<string, Assembly> AssemblyCache = new();
         
         /// <summary>
         /// 当前Hook流程中编译的程序集
