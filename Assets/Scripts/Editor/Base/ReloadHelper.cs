@@ -7,6 +7,7 @@ using Microsoft.CodeAnalysis.Emit;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Mono.Cecil.Pdb;
+using Newtonsoft.Json;
 using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEngine;
@@ -17,9 +18,8 @@ namespace FastScriptReload.Editor
     /// <summary>
     /// 热重载辅助类 - 统一的热重载管理器
     /// - ReloadHelper.cs: 公共状态和初始化
-    /// - ReloadHelper.Compile.cs: Roslyn编译
+    /// - ReloadHelper.Compile.cs: Roslyn编译和程序集差异比较
     /// - ReloadHelper.IL.cs: Mono.Cecil IL修改
-    /// - ReloadHelper.Diff.cs: 程序集差异比较
     /// - ReloadHelper.Hook.cs: Hook应用和执行
     /// </summary>
     public static partial class ReloadHelper
@@ -52,16 +52,20 @@ namespace FastScriptReload.Editor
                     // 创建保存目录：%LOCALAPPDATA%\Temp\{工程名}
                     var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                     _assemblySavePath = Path.Combine(localAppData, "Temp", "FastScriptReloadTemp", projectName);
+                }
 
-                    if (!Directory.Exists(_assemblySavePath))
-                    {
-                        Directory.CreateDirectory(_assemblySavePath);
-                    }
+                if (!Directory.Exists(_assemblySavePath))
+                {
+                    Directory.CreateDirectory(_assemblySavePath);
                 }
 
                 return _assemblySavePath;
             }
-        }        
+        }
+
+        public static readonly string ASSEMBLY_OUTPUT_PATH = Path.Combine(AssemblyPath, "Output");
+        
+        public static readonly string HOOK_TYPE_INFO_CACHE_PATH = Path.Combine(AssemblyPath, "HookTypeCache.json");
 
         /// <summary>
         /// 修改过的类型缓存
@@ -76,7 +80,7 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 初始化
         /// </summary>
-        [InitializeOnEnterPlayMode]
+        [InitializeOnLoadMethod]
         public static void Init()
         {
             if (!(bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles.GetEditorPersistedValueOrDefault())
@@ -85,6 +89,25 @@ namespace FastScriptReload.Editor
             }
 
             TypeInfoHelper.Initialize();
+            
+            AssemblyReloadEvents.beforeAssemblyReload += () =>
+            {
+                if (HookTypeInfoCache.Count == 0)
+                {
+                    return;
+                }
+
+                File.Delete(HOOK_TYPE_INFO_CACHE_PATH);
+                File.WriteAllText(HOOK_TYPE_INFO_CACHE_PATH, JsonConvert.SerializeObject(HookTypeInfoCache));
+            };
+
+            CompilationPipeline.compilationStarted += o =>
+            {
+                HookTypeInfoCache.Clear();
+                Directory.Delete(AssemblyPath, true);
+            };
+            
+            RebuildHooks();
         }
 
         /// <summary>

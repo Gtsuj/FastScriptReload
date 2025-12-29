@@ -35,7 +35,7 @@ namespace FastScriptReload.Editor
             NestedTypeInfo.Clear();
 
             // 生成文件名并保存
-            var filePath = Path.Combine(AssemblyPath, $"{_assemblyDefinition.Name.Name}.dll");
+            var filePath = Path.Combine(ASSEMBLY_OUTPUT_PATH, $"{_assemblyDefinition.Name.Name}.dll");
 
             // 确保目录存在
             var directory = Path.GetDirectoryName(filePath);
@@ -47,9 +47,14 @@ namespace FastScriptReload.Editor
             _assemblyDefinition.Write(filePath);
 
             // 设置每个类型的程序集路径
-            foreach (var (_, typeDiff) in HookTypeInfoCache)
+            foreach (var diffResult in diffResults)
             {
-                typeDiff.WrapperAssemblyPath = filePath;
+                if (!HookTypeInfoCache.TryGetValue(diffResult.Key, out var hookTypeInfo))
+                {
+                    continue;
+                }
+
+                hookTypeInfo.SetAssemblyPath(filePath, diffResult.Value);
             }
 
             return filePath;
@@ -82,19 +87,19 @@ namespace FastScriptReload.Editor
                     HookTypeInfoCache.Add(originalType.FullName, hookTypeInfo);
                 }
 
+                typeDef.Interfaces.Clear();
+                
                 // 处理新增字段
-                foreach (var fieldDefinition in typeDef.Fields)
+                foreach (var fieldDef in typeDef.Fields)
                 {
-                    if (result.AddedFields.ContainsKey(fieldDefinition.FullName))
+                    if (result.AddedFields.ContainsKey(fieldDef.FullName))
                     {
-                        hookTypeInfo.AddedFields.TryAdd(fieldDefinition.FullName, fieldDefinition);
+                        hookTypeInfo.AddedFields.TryAdd(fieldDef.FullName, new HookFieldInfo(fieldDef));
                     }
                 }
 
-                var originalMethods = originalType.GetAllMethods(_assemblyDefinition.MainModule);
-
                 // 预注册方法（复制修改的方法内容）
-                void PreRegisterMethods(Dictionary<string, MethodDiffInfo> methodDiffInfos, HookMethodState hookMethodState)
+                void PreRegisterMethods(Dictionary<string, MethodDiffInfo> methodDiffInfos, MemberModifyState hookMethodState)
                 {
                     for (int i = typeDef.Methods.Count - 1; i >= 0; i--)
                     {
@@ -111,12 +116,12 @@ namespace FastScriptReload.Editor
 
                         if (!hookTypeInfo.ModifiedMethods.TryGetValue(hookMethodName, out var hookMethodInfo))
                         {
-                            hookMethodInfo = new HookMethodInfo(newMethodDef, hookMethodState, originalMethods.GetValueOrDefault(hookMethodName));
+                            hookMethodInfo = new HookMethodInfo(hookMethodName, newMethodDef, hookMethodState);
                             hookTypeInfo.ModifiedMethods.Add(hookMethodName, hookMethodInfo);
                         }
                         else
                         {
-                            hookMethodInfo.MethodDefinition = newMethodDef;
+                            hookMethodInfo.WrapperMethodDef = newMethodDef;
                         }
 
                         typeDef.Methods.Add(newMethodDef);
@@ -124,8 +129,8 @@ namespace FastScriptReload.Editor
                 }
 
                 // 预注册添加和修改的方法
-                PreRegisterMethods(result.AddedMethods, HookMethodState.Added);
-                PreRegisterMethods(result.ModifiedMethods, HookMethodState.Modified);
+                PreRegisterMethods(result.AddedMethods, MemberModifyState.Added);
+                PreRegisterMethods(result.ModifiedMethods, MemberModifyState.Modified);
             }
 
             // 处理方法引用
@@ -150,7 +155,7 @@ namespace FastScriptReload.Editor
                             continue;
                         }
 
-                        HandleMethodDefinition(hookMethodInfo.MethodDefinition);
+                        HandleMethodDefinition(hookMethodInfo.WrapperMethodDef);
                     }
                 }
 
@@ -236,7 +241,7 @@ namespace FastScriptReload.Editor
                     {
                         if (hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var modifiedMethod))
                         {
-                            typeDef.Methods.Add(modifiedMethod.MethodDefinition);
+                            typeDef.Methods.Add(modifiedMethod.WrapperMethodDef);
                         }
                     }
                 }
@@ -424,14 +429,14 @@ namespace FastScriptReload.Editor
                 // 处理新增方法调用
                 if (hookType.TryGetAddedMethod(methodRef.FullName, out var addedMethodInfo))
                 {
-                    return module.ImportReference(addedMethodInfo.MethodDefinition);
+                    return module.ImportReference(addedMethodInfo.WrapperMethodDef);
                 }
 
                 // 处理泛型方法调用
                 if (methodRef is GenericInstanceMethod genericMethod
                     && hookType.ModifiedMethods.TryGetValue(methodRef.GetElementMethod().FullName, out var modifiedMethodInfo))
                 {
-                    var genericInstanceMethod = CreateGenericInstanceMethod(genericMethod, modifiedMethodInfo.MethodDefinition);
+                    var genericInstanceMethod = CreateGenericInstanceMethod(genericMethod, module.ImportReference(modifiedMethodInfo.WrapperMethodDef));
 
                     return genericInstanceMethod;
                 }
@@ -648,7 +653,7 @@ namespace FastScriptReload.Editor
 
                     if (methodRef is GenericInstanceMethod genericInstanceMethod)
                     {
-                        return CreateGenericInstanceMethod(genericInstanceMethod, originalMethodRef);
+                        return CreateGenericInstanceMethod(genericInstanceMethod, module.ImportReference(originalMethodRef));
                     }
 
                     return originalMethodRef;
