@@ -3,8 +3,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using FastScriptReload.Runtime;
 using HarmonyLib;
+using ImmersiveVRTools.Runtime.Common.Extensions;
 using Mono.Cecil;
+using UnityEngine;
 using MethodAttributes = System.Reflection.MethodAttributes;
 using MethodImplAttributes = System.Reflection.MethodImplAttributes;
 
@@ -53,6 +56,37 @@ namespace FastScriptReload.Editor
                 .Cast<MethodBase>()
                 .Concat(type.GetMethods(AccessTools.allDeclared))
                 .ToDictionary(m => moduleDef.ImportReference(m).FullName, m => m);
+        }
+
+        /// <summary>
+        /// 根据MethodDefinition的全称获取方法
+        /// </summary>
+        /// <returns>方法</returns>
+        public static MethodBase GetMethodByMethodDefinitionName(this Type type, string methodName)
+        {
+            var splits = methodName.Split(" ");
+            var returnTypeName = splits[0];
+            var methodNameWithoutReturn = splits[1].Replace("::", ".").Replace('<','[').Replace('>',']');
+
+            var methods = type.GetMethods(AccessTools.allDeclared);
+            foreach (var methodInfo in methods)
+            {
+                if (methodInfo.ResolveFullName().Contains(methodNameWithoutReturn))
+                {
+                    return methodInfo;
+                }
+            }
+
+            var constructors = type.GetConstructors(AccessTools.allDeclared);
+            foreach (var constructorInfo in constructors)
+            {
+                if (constructorInfo.ResolveFullName().Contains(methodNameWithoutReturn))
+                {
+                    return constructorInfo;
+                }
+            }
+
+            return null;
         }
 
         public static MethodReference GetMethodReference(this Type type, ModuleDefinition moduleDef, string methodName)
