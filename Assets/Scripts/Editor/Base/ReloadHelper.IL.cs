@@ -44,7 +44,7 @@ namespace FastScriptReload.Editor
                 Directory.CreateDirectory(directory);
             }
 
-            _assemblyDefinition.Write(filePath);
+            _assemblyDefinition.Write(filePath, TypeInfoHelper.WRITER_PARAMETERS);
 
             // 设置每个类型的程序集路径
             foreach (var diffResult in diffResults)
@@ -64,12 +64,9 @@ namespace FastScriptReload.Editor
         {
             var mainModule = _assemblyDefinition.MainModule;
 
-            foreach (var typeDef in mainModule.Types)
+            foreach (var (typeName, result) in diffResults)
             {
-                if (!diffResults.TryGetValue(typeDef.FullName, out DiffResult result))
-                {
-                    continue;
-                }
+                var typeDef = mainModule.GetType(typeName);
 
                 if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeDef.FullName, out var originalType))
                 {
@@ -117,14 +114,17 @@ namespace FastScriptReload.Editor
                         if (!hookTypeInfo.ModifiedMethods.TryGetValue(hookMethodName, out var hookMethodInfo))
                         {
                             hookMethodInfo = new HookMethodInfo(hookMethodName, newMethodDef, hookMethodState);
+                            // hookMethodInfo = new HookMethodInfo(hookMethodName, methodDef, hookMethodState);
                             hookTypeInfo.ModifiedMethods.Add(hookMethodName, hookMethodInfo);
                         }
                         else
                         {
                             hookMethodInfo.WrapperMethodDef = newMethodDef;
+                            // hookMethodInfo.WrapperMethodDef = methodDef;
                         }
 
                         typeDef.Methods.Add(newMethodDef);
+                        // typeDef.Methods.Add(methodDef);
                     }
                 }
 
@@ -134,14 +134,16 @@ namespace FastScriptReload.Editor
             }
 
             // 处理方法引用
-            foreach (var typeDef in mainModule.Types)
+            foreach (var (typeName, result) in diffResults)
             {
-                if (!diffResults.TryGetValue(typeDef.FullName, out DiffResult result))
+                var typeDef = mainModule.GetType(typeName);
+
+                if (!HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
                 {
                     continue;
                 }
-
-                if (!HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
+                
+                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeDef.FullName, out var originalType))
                 {
                     continue;
                 }
@@ -302,7 +304,7 @@ namespace FastScriptReload.Editor
             // 将@this参数加入到方法参数列表的头部
             if (originalTypeRef != null && !methodDef.IsStatic)
             {
-                newMethodDef.Parameters.Add(new ParameterDefinition("@this", ParameterAttributes.None, originalTypeRef));
+                newMethodDef.Parameters.Add(new ParameterDefinition("this", ParameterAttributes.None, originalTypeRef));
             }
 
             // 复制参数
@@ -337,6 +339,17 @@ namespace FastScriptReload.Editor
             foreach (var handler in methodDef.Body.ExceptionHandlers)
             {
                 newMethodDef.Body.ExceptionHandlers.Add(handler);
+            }
+
+            // 复制调试信息
+            if (methodDef.DebugInformation != null)
+            {
+                foreach (var sequencePoint in methodDef.DebugInformation.SequencePoints)
+                {
+                    newMethodDef.DebugInformation.SequencePoints.Add(sequencePoint);
+                }
+
+                newMethodDef.DebugInformation.Scope = methodDef.DebugInformation.Scope;
             }
 
             return newMethodDef;

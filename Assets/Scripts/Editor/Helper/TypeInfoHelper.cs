@@ -22,9 +22,9 @@ namespace FastScriptReload.Editor
     {
         public static readonly EmitOptions EMIT_OPTIONS = new (debugInformationFormat:DebugInformationFormat.PortablePdb);
         
-        public static WriterParameters WriterParameters => new() { WriteSymbols = true, SymbolWriterProvider = new PortablePdbWriterProvider() };
+        public static readonly WriterParameters WRITER_PARAMETERS = new() { WriteSymbols = true, SymbolWriterProvider = new PortablePdbWriterProvider() };
 
-        public static ReaderParameters ReaderParameters => new() { ReadWrite = true, InMemory = true };
+        public static ReaderParameters ReaderParameters = new() { ReadWrite = true, InMemory = true, ReadSymbols = true, SymbolReaderProvider = new PortablePdbReaderProvider() };
         
         #region 私有字段
 
@@ -318,13 +318,19 @@ namespace FastScriptReload.Editor
             }
 
             var ms = new MemoryStream();
-            var emitResult = compilation.Emit(ms, options: EMIT_OPTIONS);
+            var pdbMs = new MemoryStream();
+            var emitResult = compilation.Emit(ms, pdbMs, options: EMIT_OPTIONS);
 
             if (emitResult.Success)
             {
                 ms.Seek(0, SeekOrigin.Begin);
+                pdbMs.Seek(0, SeekOrigin.Begin);
+                ReaderParameters.SymbolStream = pdbMs;
                 var assemblyDef = AssemblyDefinition.ReadAssembly(ms, ReaderParameters);
-                assemblyDef.Name.Name = $"{assemblyName}_{Guid.NewGuid()}";
+                
+                var assemblyDefName = $"{assemblyName}_{Guid.NewGuid()}";
+                assemblyDef.Name.Name = assemblyDefName;
+                assemblyDef.MainModule.Name = assemblyDefName;
 
                 if (isCache)
                 {
