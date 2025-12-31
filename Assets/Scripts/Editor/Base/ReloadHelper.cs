@@ -87,18 +87,20 @@ namespace FastScriptReload.Editor
             {
                 return;
             }
+            
+            RebuildHooks();
 
             TypeInfoHelper.Initialize();
             
             AssemblyReloadEvents.beforeAssemblyReload += () =>
             {
-                if (HookTypeInfoCache.Count == 0)
+                if (HookTypeInfoCache.Count != 0)
                 {
-                    return;
+                    File.Delete(HOOK_TYPE_INFO_CACHE_PATH);
+                    File.WriteAllText(HOOK_TYPE_INFO_CACHE_PATH, JsonConvert.SerializeObject(HookTypeInfoCache));
                 }
 
-                File.Delete(HOOK_TYPE_INFO_CACHE_PATH);
-                File.WriteAllText(HOOK_TYPE_INFO_CACHE_PATH, JsonConvert.SerializeObject(HookTypeInfoCache));
+                TypeInfoHelper.Serialize();
             };
 
             CompilationPipeline.compilationStarted += o =>
@@ -106,8 +108,6 @@ namespace FastScriptReload.Editor
                 HookTypeInfoCache.Clear();
                 Directory.Delete(AssemblyPath, true);
             };
-            
-            RebuildHooks();
         }
 
         /// <summary>

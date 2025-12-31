@@ -1,20 +1,26 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.Serialization;
 using System.Text;
 using System.Threading.Tasks;
+using FastScriptReload.Editor;
 using ImmersiveVrToolsCommon.Runtime.Logging;
+using MessagePack;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Emit;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Newtonsoft.Json;
 using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEngine;
+using Debug = UnityEngine.Debug;
 
 namespace FastScriptReload.Editor
 {
@@ -26,14 +32,14 @@ namespace FastScriptReload.Editor
 
         public static ReaderParameters ReaderParameters = new() { ReadWrite = true, InMemory = true, ReadSymbols = true, SymbolReaderProvider = new PortablePdbReaderProvider() };
         
-        #region 私有字段
-
-        private static bool _isInitialized;
-
         /// <summary>
         /// 解析选项
         /// </summary>
-        private static CSharpParseOptions _parseOptions;
+        public static CSharpParseOptions ParseOptions;
+        
+        #region 私有字段
+
+        private static bool _isInitialized;
 
         /// <summary>
         /// Assembly 名称 -> CSharpCompilation 的缓存
@@ -53,6 +59,14 @@ namespace FastScriptReload.Editor
         private static readonly ConcurrentDictionary<string, Dictionary<string, GenericMethodCallInfo>> _methodCallGraph = new();
 
         /// <summary>
+        /// 泛型方法调用图索引：泛型方法签名 -> 调用者方法信息集合
+        /// Key: 被调用的泛型方法完整签名（包含类型参数）
+        /// Value: 调用者方法信息集合（类型名, 方法完整签名）
+        /// 通过 Roslyn 语义分析收集
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, Dictionary<string, GenericMethodCallInfo>> _genericMethodCallGraph = new();
+
+        /// <summary>
         /// 文件路径 -> Assembly 名称
         /// </summary>
         private static readonly ConcurrentDictionary<string, string> _fileToAssembly = new();
@@ -60,7 +74,7 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 文件路径 -> FileSnapshot 的缓存
         /// </summary>
-        private static readonly ConcurrentDictionary<string, FileSnapshot> _fileSnapshots = new();
+        private static ConcurrentDictionary<string, FileSnapshot> _fileSnapshots = new();
 
         /// <summary>
         /// 代码生成器缓存
@@ -71,6 +85,13 @@ namespace FastScriptReload.Editor
         /// 代码生成器 DLL 文件名(先写死)
         /// </summary>
         private const string SourceGeneratorDllName = "CSharpCodeAnalysis.dll";
+
+        /// <summary>
+        /// 类型全名 -> 类型分析结果的缓存
+        /// Key: 类型全名
+        /// Value: 类型分析结果（Partial文件、Internal成员、泛型方法）
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, TypeAnalysisResult> _typeAnalysisCache = new();
 
         #endregion
 
@@ -84,15 +105,17 @@ namespace FastScriptReload.Editor
             if (_isInitialized)
                 return;
 
-            _parseOptions = new CSharpParseOptions(
+            ParseOptions = new CSharpParseOptions(
                 preprocessorSymbols: EditorUserBuildSettings.activeScriptCompilationDefines,
                 languageVersion: LanguageVersion.Latest
             );
+            
+            Deserialize();
 
             // 加载代码生成器
             LoadSourceGenerators();
 
-            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var stopwatch = Stopwatch.StartNew();
 
             // 获取所有 Unity 程序集
             var allAssemblies = CompilationPipeline.GetAssemblies();
@@ -119,7 +142,8 @@ namespace FastScriptReload.Editor
                     var assemblyDefCopy = assemblyDef;
                     tasks.Add(Task.Run(async () =>
                     {
-                        await Task.WhenAll(BuildAssemblyCompilation(assemblyCopy), BuildMethodCallGraph(assemblyDefCopy));
+                        // await Task.WhenAll(BuildAssemblyCompilation(assemblyCopy), BuildMethodCallGraph(assemblyDefCopy));
+                        await BuildAssemblyCompilation(assemblyCopy);
                     }));
                 }
                 catch (Exception ex)
@@ -155,37 +179,194 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
-        /// 增量更新程序集（只更新改动的文件）
+        /// 获取类型的分析结果（从缓存）
         /// </summary>
-        public static void UpdateSyntaxTrees(string assemblyName, List<string> changedFiles)
+        /// <param name="typeFullName">类型的全名</param>
+        /// <returns>类型分析结果，如果不存在则返回 null</returns>
+        public static TypeAnalysisResult GetTypeAnalysisResult(string typeFullName)
         {
-            if (!_assemblyCompilations.TryGetValue(assemblyName, out var compilation))
-            {
-                LoggerScoped.LogWarning($"找不到程序集 {assemblyName} 的编译缓存");
+            return _typeAnalysisCache.GetValueOrDefault(typeFullName);
+        }
+
+        /// <summary>
+        /// 根据类型全名递归收集所有依赖的文件
+        /// </summary>
+        /// <param name="typeFullName">类型全名</param>
+        /// <param name="allFiles">收集的所有文件（输出）</param>
+        /// <param name="processedTypes">已处理的类型（避免循环依赖）</param>
+        private static void CollectDependentFilesRecursive(string typeFullName, HashSet<string> allFiles, HashSet<string> processedTypes)
+        {
+            // 避免循环依赖
+            if (!processedTypes.Add(typeFullName))
                 return;
+
+            // 获取类型分析结果
+            var analysisResult = GetTypeAnalysisResult(typeFullName);
+            if (analysisResult == null)
+                return;
+            
+            // 添加当前类型的所有部分类文件
+            foreach (var filePath in analysisResult.FilePaths)
+            {
+                allFiles.Add(filePath);
             }
+            
+            // 递归处理 Internal 依赖类型
+            foreach (var internalTypeFullName in analysisResult.InternalTypes)
+            {
+                CollectDependentFilesRecursive(internalTypeFullName, allFiles, processedTypes);
+            }
+            
+            // 递归处理泛型方法依赖类型
+            foreach (var genericMethodTypeFullName in analysisResult.GenericMethodTypes)
+            {
+                CollectDependentFilesRecursive(genericMethodTypeFullName, allFiles, processedTypes);
+            }
+        }
+
+        /// <summary>
+        /// 根据多个文件路径获取所有依赖的文件
+        /// </summary>
+        /// <param name="filePaths">源文件路径集合</param>
+        /// <returns>所有依赖的文件路径集合（包括输入文件）</returns>
+        public static HashSet<string> GetAllDependentFiles(List<string> filePaths)
+        {
+            var allFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var processedTypes = new HashSet<string>();
+            
+            // 获取所有文件中定义的所有类型
+            var allTypes = GetTypesFromFiles(filePaths);
+            
+            // 递归分析每个类型的依赖
+            foreach (var typeFullName in allTypes)
+            {
+                CollectDependentFilesRecursive(typeFullName, allFiles, processedTypes);
+            }
+            
+            return allFiles;
+        }
+
+        /// <summary>
+        /// 根据改动文件列表进行增量编译并保存
+        /// </summary>
+        /// <param name="assemblyName">程序集名称</param>
+        /// <param name="changedFiles">改动的文件路径列表</param>
+        /// <returns>编译后的 AssemblyDefinition，如果编译失败返回 null</returns>
+        public static AssemblyDefinition CompileIncrementalChanges(string assemblyName, List<string> changedFiles)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            
+            // 从缓存中收集语法树
+            var syntaxTrees = new List<SyntaxTree>();
 
             foreach (var filePath in changedFiles)
             {
-                // 更新文件快照
-                var fileSnapshot = _fileSnapshots.GetValueOrDefault(filePath) ?? new FileSnapshot(filePath);
-                var newSyntaxTree = GetSyntaxTree(filePath);
-
-                // 更新 CSharpCompilation 中的 SyntaxTree
-                if (fileSnapshot.SyntaxTree != null)
+                var fileSnapshot = _fileSnapshots.GetValueOrDefault(filePath);
+                if (fileSnapshot?.SyntaxTree != null)
                 {
-                    compilation = compilation.ReplaceSyntaxTree(fileSnapshot.SyntaxTree, newSyntaxTree);
+                    syntaxTrees.Add(fileSnapshot.SyntaxTree);
                 }
-                else
-                {
-                    // 如果是新文件，添加到编译中
-                    compilation = compilation.AddSyntaxTrees(newSyntaxTree);
-                }
-
-                fileSnapshot.SyntaxTree = newSyntaxTree;
+            }
+            
+            // 获取已有的 Compilation
+            if (!_assemblyCompilations.TryGetValue(assemblyName, out var existingCompilation))
+            {
+                LoggerScoped.LogError($"找不到程序集 {assemblyName} 的 Compilation 缓存，请先调用 BuildAssemblyCompilation");
+                return null;
             }
 
-            _assemblyCompilations[assemblyName] = compilation;
+            // 从已有的 Compilation 中复用引用
+            var references = existingCompilation.References.ToList();
+            
+            var existingAssemblyDef = GetAssemblyDefinition(assemblyName, 0);
+            references.Add(MetadataReference.CreateFromFile(existingAssemblyDef.MainModule.FileName));
+
+            // 创建 CSharpCompilation
+            var compilation = CSharpCompilation.Create(
+                assemblyName: assemblyName,
+                syntaxTrees: syntaxTrees,
+                references: references,
+                options: new CSharpCompilationOptions(
+                    OutputKind.DynamicallyLinkedLibrary,
+                    optimizationLevel: OptimizationLevel.Debug,
+                    allowUnsafe: existingCompilation.Options.AllowUnsafe,
+                    concurrentBuild:true,
+                    deterministic:false
+                )
+            );
+            
+            // 检查编译错误
+            var diagnostics = compilation.GetDiagnostics()
+                .Where(d => d.Severity == DiagnosticSeverity.Error)
+                .ToList();
+
+            if (diagnostics.Any())
+            {
+                LoggerScoped.LogError($"程序集 {assemblyName} 编译失败，错误数: {diagnostics.Count}");
+                foreach (var diagnostic in diagnostics)
+                {
+                    LoggerScoped.LogError($"  {diagnostic}");
+                }
+                return null;
+            }
+            
+            // 编译到内存流
+            using var peStream = new MemoryStream();
+            using var pdbStream = new MemoryStream();
+            
+            var emitResult = compilation.Emit(peStream, pdbStream, options: EMIT_OPTIONS);
+            
+            if (!emitResult.Success)
+            {
+                LoggerScoped.LogError($"程序集 {assemblyName} Emit 失败");
+                foreach (var diagnostic in emitResult.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error))
+                {
+                    LoggerScoped.LogError($"  {diagnostic}");
+                }
+                return null;
+            }
+            
+            // 加载为 AssemblyDefinition
+            peStream.Seek(0, SeekOrigin.Begin);
+            pdbStream.Seek(0, SeekOrigin.Begin);
+            
+            var readerParameters = new ReaderParameters
+            {
+                ReadSymbols = true,
+                SymbolStream = pdbStream,
+                ReadingMode = ReadingMode.Immediate
+            };
+            
+            var assemblyDef = AssemblyDefinition.ReadAssembly(peStream, readerParameters);
+            
+            stopwatch.Stop();
+            LoggerScoped.LogDebug($"程序集 {assemblyName} 增量编译完成，耗时: {stopwatch.ElapsedMilliseconds}ms");
+            
+            return assemblyDef;
+        }
+
+        /// <summary>
+        /// 增量更新程序集（只更新改动的文件）
+        /// </summary>
+        public static void UpdateSyntaxTrees(List<string> changedFiles)
+        {
+            foreach (var filePath in changedFiles)
+            {
+                var assemblyName = _fileToAssembly[filePath];
+                if (!_assemblyCompilations.TryGetValue(assemblyName, out var compilation))
+                {
+                    LoggerScoped.LogWarning($"找不到程序集 {assemblyName} 的编译缓存");
+                    return;
+                }
+                // 更新文件快照
+                var fileSnapshot = _fileSnapshots.GetValueOrDefault(filePath) ?? new FileSnapshot(filePath);
+                var oldTree = fileSnapshot.SyntaxTree;
+                fileSnapshot.Update();
+
+                // 更新 CSharpCompilation 中的 SyntaxTree
+                compilation = compilation.ReplaceSyntaxTree(oldTree, fileSnapshot.SyntaxTree);
+                _assemblyCompilations[assemblyName] = compilation;
+            }
         }
 
         /// <summary>
@@ -238,6 +419,66 @@ namespace FastScriptReload.Editor
             var callers = _methodCallGraph.GetValueOrDefault(methodFullName);
             // 返回一个副本以保持线程安全和向后兼容
             return callers != null ? new Dictionary<string, GenericMethodCallInfo>(callers) : null;
+        }
+
+        /// <summary>
+        /// 查找泛型方法的调用者
+        /// </summary>
+        /// <param name="genericMethodFullName">泛型方法的完整签名（包含类型参数）</param>
+        /// <returns>调用者方法信息集合（类型名, 方法完整签名）</returns>
+        public static Dictionary<string, GenericMethodCallInfo> FindGenericMethodCallers(string genericMethodFullName)
+        {
+            var callers = _genericMethodCallGraph.GetValueOrDefault(genericMethodFullName);
+            return callers;
+        }
+
+        /// <summary>
+        /// 添加泛型方法调用关系
+        /// </summary>
+        /// <param name="genericMethodFullName">被调用的泛型方法全名</param>
+        /// <param name="callerMethodFullName">调用者方法全名</param>
+        /// <param name="callerTypeName">调用者类型全名</param>
+        public static void AddGenericMethodCall(string genericMethodFullName, string callerMethodFullName, string callerTypeName)
+        {
+            // 筛选：排除通用库的泛型方法
+            if (ShouldExcludeGenericMethod(genericMethodFullName))
+            {
+                return;
+            }
+            
+            var callers = _genericMethodCallGraph.GetOrAdd(genericMethodFullName, _ => new Dictionary<string, GenericMethodCallInfo>());
+            
+            if (!callers.ContainsKey(callerMethodFullName))
+            {
+                callers[callerMethodFullName] = new GenericMethodCallInfo(callerTypeName, callerMethodFullName);
+            }
+        }
+
+        /// <summary>
+        /// 判断是否应该排除某个泛型方法（通用库）
+        /// </summary>
+        private static bool ShouldExcludeGenericMethod(string genericMethodFullName)
+        {
+            if (string.IsNullOrEmpty(genericMethodFullName))
+                return true;
+
+            // 排除 System 命名空间（包括容器类）
+            if (genericMethodFullName.StartsWith("System.", StringComparison.Ordinal))
+                return true;
+
+            // 排除 Unity 相关命名空间
+            if (genericMethodFullName.StartsWith("UnityEngine.", StringComparison.Ordinal) ||
+                genericMethodFullName.StartsWith("UnityEditor.", StringComparison.Ordinal) ||
+                genericMethodFullName.StartsWith("Unity.", StringComparison.Ordinal))
+                return true;
+
+            // 排除常见的第三方库
+            if (genericMethodFullName.StartsWith("Newtonsoft.", StringComparison.Ordinal) ||
+                genericMethodFullName.StartsWith("Mono.", StringComparison.Ordinal) ||
+                genericMethodFullName.StartsWith("Microsoft.", StringComparison.Ordinal))
+                return true;
+
+            return false;
         }
 
         /// <summary>
@@ -376,6 +617,50 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
+        /// 分析程序集中的所有类型
+        /// </summary>
+        /// <param name="compilation">程序集</param>
+        public static void AnalyzeAssembly(CSharpCompilation compilation)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            
+            foreach (var syntaxTree in compilation.SyntaxTrees)
+            {
+                var semanticModel = compilation.GetSemanticModel(syntaxTree);
+                var root = syntaxTree.GetRoot();
+                var typeDeclarations = root.DescendantNodes().OfType<TypeDeclarationSyntax>();
+
+                foreach (var typeDecl in typeDeclarations)
+                {
+                    var typeSymbol = semanticModel.GetDeclaredSymbol(typeDecl);
+                    if (typeSymbol == null)
+                        continue;
+
+                    var typeFullName = typeSymbol.FullName();
+
+                    // 从缓存获取或创建新的结果对象
+                    var result = _typeAnalysisCache.GetOrAdd(typeFullName, _ => new TypeAnalysisResult
+                    {
+                        TypeFullName = typeFullName,
+                        AssemblyName = compilation.AssemblyName,
+                        FilePaths = new HashSet<string>(),
+                        InternalTypes = new HashSet<string>(),
+                        GenericMethodTypes = new HashSet<string>()
+                    });
+                    
+                    result.FilePaths.Add(syntaxTree.FilePath);
+
+                    // 分析该声明中使用的成员（internal 和泛型方法）
+                    result.AnalyzeTypeDeclaration(typeDecl, semanticModel);
+                }
+            }
+
+            stopwatch.Stop();
+            LoggerScoped.LogDebug($"程序集  {compilation.AssemblyName} 类型分析完成，耗时: {stopwatch.ElapsedMilliseconds}ms, " +
+                             $"类型声明数: {_typeAnalysisCache.Count}");
+        }
+
+        /// <summary>
         /// 检查类型是否是Task状态机
         /// </summary>
         public static bool TypeIsTaskStateMachine(TypeDefinition typeDef)
@@ -383,6 +668,29 @@ namespace FastScriptReload.Editor
             return typeDef.Interfaces.Any(implementation => implementation.InterfaceType.FullName.Equals("System.Runtime.CompilerServices.IAsyncStateMachine"));
         }
 
+        private static string _fileSnapshotsPath = Path.Combine(ReloadHelper.AssemblyPath, "FileSnapshots.json");
+
+        public static void Serialize()
+        {
+            if (_fileSnapshots.Count != 0)
+            {
+                if (File.Exists(_fileSnapshotsPath))
+                {
+                    File.Delete(_fileSnapshotsPath);
+                }
+                var fileSnapshots = JsonConvert.SerializeObject(_fileSnapshots);
+                File.WriteAllText(_fileSnapshotsPath, fileSnapshots);
+            }
+        }
+
+        public static void Deserialize()
+        {
+            if (File.Exists(_fileSnapshotsPath))
+            {
+                var fileSnapshots = File.ReadAllText(_fileSnapshotsPath);
+                _fileSnapshots = JsonConvert.DeserializeObject<ConcurrentDictionary<string, FileSnapshot>>(fileSnapshots);
+            }
+        }
         #endregion
 
         #region 私有实现方法
@@ -459,7 +767,7 @@ namespace FastScriptReload.Editor
                 return null;
             }
 
-            var syntaxTree = CSharpSyntaxTree.ParseText(content, _parseOptions, path: filePath, encoding: Encoding.UTF8);
+            var syntaxTree = CSharpSyntaxTree.ParseText(content, ParseOptions, path: filePath, encoding: Encoding.UTF8);
 
             return syntaxTree;
         }
@@ -471,15 +779,8 @@ namespace FastScriptReload.Editor
         {
             if (!_fileSnapshots.TryGetValue(filePath, out var fileSnapshot))
             {
-                var syntaxTree = GetSyntaxTree(filePath);
-                if (syntaxTree != null)
-                {
-                    fileSnapshot = new FileSnapshot(filePath)
-                    {
-                        SyntaxTree = syntaxTree,
-                    };
-                    _fileSnapshots[filePath] = fileSnapshot;
-                }
+                fileSnapshot = new FileSnapshot(filePath);
+                _fileSnapshots[filePath] = fileSnapshot;
             }
 
             return fileSnapshot;
@@ -518,10 +819,10 @@ namespace FastScriptReload.Editor
 
             await Task.WhenAll(tasks);
 
-            // 将 ConcurrentBag 转换为 List（保持顺序）
-            var syntaxTreesList = syntaxTrees.ToList();
-            if (syntaxTreesList.Count == 0)
+            if (syntaxTrees.Count == 0)
+            {
                 return;
+            }
 
             // 构建引用
             var references = new List<MetadataReference>();
@@ -546,7 +847,7 @@ namespace FastScriptReload.Editor
             // 创建 CSharpCompilation
             var compilation = CSharpCompilation.Create(
                 assemblyName: assembly.name,
-                syntaxTrees: syntaxTreesList,
+                syntaxTrees: syntaxTrees,
                 references: references,
                 options: new CSharpCompilationOptions(
                     OutputKind.DynamicallyLinkedLibrary,
@@ -568,6 +869,9 @@ namespace FastScriptReload.Editor
             {
                 _assemblyCompilations[assembly.name] = compilation;
             }
+
+            // 分析程序集中的所有类型
+            AnalyzeAssembly(compilation);
         }
 
         /// <summary>
@@ -677,6 +981,14 @@ namespace FastScriptReload.Editor
             builder.Append(string.Join(".", parts));
             return builder.ToString();
         }
+        
+        /// <summary>
+        /// 获取类型的全名（包括命名空间）
+        /// </summary>
+        public static string FullName(this INamedTypeSymbol typeSymbol)
+        {
+            return typeSymbol.ToDisplayString();
+        }
         #endregion
     }
 }
@@ -685,17 +997,41 @@ namespace FastScriptReload.Editor
 /// <summary>
 /// 文件快照
 /// </summary>
+// [MessagePackObject]
 [Serializable]
 public class FileSnapshot
 {
     public string FilePath;
-    public SyntaxTree SyntaxTree;
-    public DateTime SnapshotTime;
 
+    [JsonIgnore]
+    public SyntaxTree SyntaxTree;
+
+    public string FileContent;
+
+    public FileSnapshot() { }
+    
     public FileSnapshot(string path)
     {
         FilePath = path;
-        SnapshotTime = DateTime.UtcNow;
+        Update();
+    }
+
+    public void Update()
+    {
+        FileContent = File.ReadAllText(FilePath);
+        if (!string.IsNullOrEmpty(FileContent))
+        {
+            SyntaxTree = CSharpSyntaxTree.ParseText(FileContent, TypeInfoHelper.ParseOptions, path: FilePath, encoding: Encoding.UTF8);
+        }
+    }
+
+    [OnDeserialized]
+    private void OnDeserialized(StreamingContext context)
+    {
+        if (!string.IsNullOrEmpty(FileContent))
+        {
+            SyntaxTree = CSharpSyntaxTree.ParseText(FileContent, TypeInfoHelper.ParseOptions, path: FilePath, encoding: Encoding.UTF8);
+        }
     }
 }
 
@@ -740,4 +1076,230 @@ public class FileSnapshot
              return ((TypeName?.GetHashCode() ?? 0) * 397) ^ (MethodName?.GetHashCode() ?? 0);
          }
      }
+ }
+
+ /// <summary>
+ /// 类型分析结果
+ /// </summary>
+ public class TypeAnalysisResult
+ {
+     /// <summary>
+     /// 类型全名
+     /// </summary>
+     public string TypeFullName { get; set; }
+     
+     /// <summary>
+     /// 程序集名称
+     /// </summary>
+     public string AssemblyName { get; set; }
+     
+    /// <summary>
+    /// 类型所在文件路径集合
+    /// </summary>
+    public HashSet<string> FilePaths { get; set; }
+    
+   /// <summary>
+   /// 类中使用的 internal 成员所在的类型全名集合
+   /// </summary>
+   public HashSet<string> InternalTypes { get; set; }
+   
+   /// <summary>
+   /// 类中使用的泛型方法所在的类型全名集合
+   /// </summary>
+   public HashSet<string> GenericMethodTypes { get; set; }
+   
+   /// <summary>
+   /// 分析类型声明中使用的成员
+   /// </summary>
+   public void AnalyzeTypeDeclaration(TypeDeclarationSyntax typeDecl, SemanticModel semanticModel)
+    {
+        // 遍历类型声明中的所有成员
+        foreach (var member in typeDecl.Members)
+        {
+            // 分析方法成员
+            if (member is MethodDeclarationSyntax methodDecl)
+            {
+                var methodSymbol = semanticModel.GetDeclaredSymbol(methodDecl);
+                if (methodSymbol != null)
+                {
+                    var callerMethodFullName = GetMethodFullName(methodSymbol);
+                    AnalyzeMethodForInternalAndGeneric(methodDecl, semanticModel, callerMethodFullName);
+                }
+            }
+            // 分析构造函数
+            else if (member is ConstructorDeclarationSyntax ctorDecl)
+            {
+                var ctorSymbol = semanticModel.GetDeclaredSymbol(ctorDecl);
+                if (ctorSymbol != null)
+                {
+                    var callerMethodFullName = GetMethodFullName(ctorSymbol);
+                    AnalyzeMethodBodyForInternalAndGeneric(ctorDecl.Body, semanticModel, callerMethodFullName);
+                    
+                    // 分析表达式体构造函数
+                    if (ctorDecl.ExpressionBody != null)
+                    {
+                        AnalyzeExpressionForInternalAndGeneric(ctorDecl.ExpressionBody.Expression, semanticModel, callerMethodFullName);
+                    }
+                }
+            }
+            // 分析属性
+            else if (member is PropertyDeclarationSyntax propertyDecl)
+            {
+                var propertySymbol = semanticModel.GetDeclaredSymbol(propertyDecl);
+                if (propertySymbol != null)
+                {
+                    // 分析属性访问器
+                    if (propertyDecl.AccessorList != null)
+                    {
+                        foreach (var accessor in propertyDecl.AccessorList.Accessors)
+                        {
+                            var accessorSymbol = semanticModel.GetDeclaredSymbol(accessor);
+                            if (accessorSymbol != null)
+                            {
+                                var callerMethodFullName = GetMethodFullName(accessorSymbol);
+                                AnalyzeMethodBodyForInternalAndGeneric(accessor.Body, semanticModel, callerMethodFullName);
+                                
+                                if (accessor.ExpressionBody != null)
+                                {
+                                    AnalyzeExpressionForInternalAndGeneric(accessor.ExpressionBody.Expression, semanticModel, callerMethodFullName);
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 分析表达式体属性
+                    if (propertyDecl.ExpressionBody != null)
+                    {
+                        // 表达式体属性使用 getter 方法名
+                        var getterFullName = $"{TypeFullName}.get_{propertySymbol.Name}()";
+                        AnalyzeExpressionForInternalAndGeneric(propertyDecl.ExpressionBody.Expression, semanticModel, getterFullName);
+                    }
+                }
+            }
+            // 分析字段初始化器
+            else if (member is FieldDeclarationSyntax fieldDecl)
+            {
+                foreach (var variable in fieldDecl.Declaration.Variables)
+                {
+                    if (variable.Initializer != null)
+                    {
+                        // 字段初始化器使用字段名作为"调用者"
+                        var fieldName = $"{TypeFullName}..ctor::{variable.Identifier.ValueText}";
+                        AnalyzeExpressionForInternalAndGeneric(variable.Initializer.Value, semanticModel, fieldName);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 分析方法声明中使用的 internal 成员和泛型方法
+    /// </summary>
+    private void AnalyzeMethodForInternalAndGeneric(MethodDeclarationSyntax methodDecl, SemanticModel semanticModel, string callerMethodFullName)
+    {
+        // 分析方法体
+        AnalyzeMethodBodyForInternalAndGeneric(methodDecl.Body, semanticModel, callerMethodFullName);
+        
+        // 分析表达式体方法
+        if (methodDecl.ExpressionBody != null)
+        {
+            AnalyzeExpressionForInternalAndGeneric(methodDecl.ExpressionBody.Expression, semanticModel, callerMethodFullName);
+        }
+    }
+
+    /// <summary>
+    /// 分析方法体中使用的 internal 成员和泛型方法
+    /// </summary>
+    private void AnalyzeMethodBodyForInternalAndGeneric(BlockSyntax body, SemanticModel semanticModel, string callerMethodFullName)
+    {
+        if (body == null)
+            return;
+
+        // 遍历方法体中的所有表达式
+        var expressions = body.DescendantNodes().OfType<ExpressionSyntax>();
+        
+        foreach (var expression in expressions)
+        {
+            AnalyzeExpressionForInternalAndGeneric(expression, semanticModel, callerMethodFullName);
+        }
+    }
+
+    /// <summary>
+    /// 分析表达式中使用的 internal 成员和泛型方法
+    /// </summary>
+    private void AnalyzeExpressionForInternalAndGeneric(ExpressionSyntax expression, SemanticModel semanticModel, string callerMethodFullName)
+    {
+        if (expression == null)
+            return;
+
+        var symbolInfo = semanticModel.GetSymbolInfo(expression);
+        var symbol = symbolInfo.Symbol;
+
+        if (symbol == null)
+            return;
+
+        // 检查是否是 internal 成员
+        if (symbol.DeclaredAccessibility == Accessibility.Internal)
+        {
+            var containingType = symbol.ContainingType;
+            if (containingType != null)
+            {
+                var typeFullName = containingType.FullName();
+                if (!string.IsNullOrEmpty(typeFullName))
+                {
+                    InternalTypes.Add(typeFullName);
+                }
+            }
+        }
+
+        // 检查是否是泛型方法调用
+        if (symbol is IMethodSymbol methodSymbol)
+        {
+            bool isGenericCall = false;
+            string genericMethodFullName = null;
+            
+            // 检查方法本身是否是泛型的
+            if (methodSymbol.IsGenericMethod && methodSymbol.TypeArguments.Length > 0)
+            {
+                isGenericCall = true;
+                genericMethodFullName = GetGenericMethodFullName(methodSymbol);
+            }
+
+            // 检查方法所在类型是否是泛型的
+            else if (methodSymbol.ContainingType.IsGenericType && !methodSymbol.ContainingType.IsUnboundGenericType)
+            {
+                isGenericCall = true;
+                genericMethodFullName = GetGenericMethodFullName(methodSymbol);
+            }
+            
+            // 如果是泛型方法调用，添加到全局调用图和类型集合
+            if (isGenericCall && !string.IsNullOrEmpty(genericMethodFullName) && !string.IsNullOrEmpty(callerMethodFullName))
+            {
+                TypeInfoHelper.AddGenericMethodCall(genericMethodFullName, callerMethodFullName, TypeFullName);
+                
+                // 添加泛型方法所在的类型到 GenericMethodTypes（粗粒度）
+                var genericMethodTypeFullName = methodSymbol.ContainingType.FullName();
+                if (!string.IsNullOrEmpty(genericMethodTypeFullName))
+                {
+                    GenericMethodTypes.Add(genericMethodTypeFullName);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 获取泛型方法的全名（包含类型参数）
+    /// </summary>
+    private static string GetGenericMethodFullName(IMethodSymbol methodSymbol)
+    {
+        return methodSymbol.ConstructedFrom.ToString();
+    }
+
+    /// <summary>
+    /// 获取方法的全名（用于识别调用者）
+    /// </summary>
+    private static string GetMethodFullName(IMethodSymbol methodSymbol)
+    {
+        return methodSymbol.ConstructedFrom.ToString();
+    }
  }

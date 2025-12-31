@@ -22,7 +22,9 @@ namespace FastScriptReload.Editor
         /// <returns></returns>
         public static Dictionary<string, DiffResult> CompileAndDiff(string assemblyName, List<string> files)
         {
-            TypeInfoHelper.UpdateSyntaxTrees(assemblyName, files);
+            // TypeInfoHelper.UpdateSyntaxTrees(assemblyName, files);
+            
+            TypeInfoHelper.CompileIncrementalChanges(assemblyName, files);
 
             if (TypeInfoHelper.Compile(assemblyName) == null)
             {

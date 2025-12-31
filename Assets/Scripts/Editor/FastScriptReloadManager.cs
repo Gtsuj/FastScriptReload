@@ -563,17 +563,19 @@ namespace FastScriptReload.Editor
                 // var unityMainThreadDispatcher = UnityMainThreadDispatcher.Instance.EnsureInitialized(); //need to pass that in, resolving on other than main thread will cause exception
                 Task.Run(() =>
                 {
-                    // 按程序集分组
-                    var filesByAssembly = changesAwaitingHotReload
-                        .GroupBy(e => TypeInfoHelper.GetAssemblyName(e.FullFileName))
-                        .ToDictionary(g => g.Key, g => g.GroupBy(e => e.FullFileName)
-                            .Select(e => e.First().FullFileName).ToList());
+                    var files = changesAwaitingHotReload.Select(state => state.FullFileName).ToList();
+                    TypeInfoHelper.UpdateSyntaxTrees(files);
+                    var compileFiles = TypeInfoHelper.GetAllDependentFiles(files);
+                    
+                    var filesByAssembly = compileFiles
+                        .GroupBy(TypeInfoHelper.GetAssemblyName)
+                        .ToDictionary(g => g.Key, g => g.ToList());
 
                     try
                     {
-                        foreach (var pair in filesByAssembly)
+                        foreach (var (assemblyName, allFiles) in filesByAssembly)
                         {
-                            ReloadChangedFiles(changesAwaitingHotReload, pair.Key, pair.Value);
+                            ReloadChangedFiles(changesAwaitingHotReload, assemblyName, allFiles);
                         }
                     }
                     finally
@@ -612,7 +614,7 @@ namespace FastScriptReload.Editor
                 LoggerScoped.LogDebug($"ModifyCompileAssembly耗时: {stopwatch.ElapsedMilliseconds}ms");
 
                 // 应用热重载Hook
-                ReloadHelper.ApplyHooks(diffResults);
+                // ReloadHelper.ApplyHooks(diffResults);
                 LoggerScoped.LogDebug($"ApplyHooks耗时: {stopwatch.ElapsedMilliseconds}ms");
 
                 changesAwaitingHotReload.ForEach(c =>
@@ -623,7 +625,7 @@ namespace FastScriptReload.Editor
 
                 _hotReloadPerformedCount++;
 
-                SafeInvoke(HotReloadSucceeded, changesAwaitingHotReload);
+                // SafeInvoke(HotReloadSucceeded, changesAwaitingHotReload);
             }
             catch (Exception ex)
             {

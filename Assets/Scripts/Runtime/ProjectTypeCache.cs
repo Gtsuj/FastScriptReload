@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using Debug = UnityEngine.Debug;
 
 namespace FastScriptReload.Runtime
 {
@@ -44,6 +45,10 @@ namespace FastScriptReload.Runtime
             }
         }
 
+        public static void Get<T>(T arg)
+        {
+            Debug.Log($"FastScript {arg}");
+        }
     }
 }
 #endif
