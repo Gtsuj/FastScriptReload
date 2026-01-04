@@ -302,8 +302,27 @@ namespace FastScriptReload.Editor
             return list[index];
         }
 
+        public static AssemblyDefinition CloneAssemblyDefinition(string assemblyName)
+        {
+            var sourceAssembly = GetAssemblyDefinition(assemblyName, -1);
+            
+            var ms = new MemoryStream();
+            var pdbMs = new MemoryStream();
+            
+            WRITER_PARAMETERS.SymbolStream = pdbMs;
+            sourceAssembly.Write(ms, WRITER_PARAMETERS);
+            WRITER_PARAMETERS.SymbolStream = null;
+            
+            ms.Seek(0, SeekOrigin.Begin);
+            pdbMs.Seek(0, SeekOrigin.Begin);
+            ReaderParameters.SymbolStream = pdbMs;
+            var assemblyDef = AssemblyDefinition.ReadAssembly(ms, ReaderParameters);
+
+            return assemblyDef;
+        }
+
         /// <summary>
-        /// 拷贝并编译程序集，返回新的 AssemblyDefinition
+        /// 编译程序集并返回 AssemblyDefinition
         /// </summary>
         /// <param name="assemblyName">程序集名称</param>
         /// <param name="isCache"></param>

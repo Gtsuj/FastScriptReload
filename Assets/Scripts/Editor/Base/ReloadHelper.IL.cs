@@ -23,19 +23,16 @@ namespace FastScriptReload.Editor
 
         public static string ModifyCompileAssembly(string assemblyName, Dictionary<string, DiffResult> diffResults)
         {
-            // 编译一份新的用于修改
-            _assemblyDefinition = TypeInfoHelper.Compile(assemblyName, false);
+            var assemblyDef = TypeInfoHelper.CloneAssemblyDefinition(assemblyName);
 
             // 修改程序集
-            HandleAssemblyType(diffResults);
+            HandleAssemblyType(assemblyDef, diffResults);
 
             // 清理程序集
-            ClearAssembly(diffResults);
-
-            NestedTypeInfo.Clear();
+            ClearAssembly(assemblyDef, diffResults);
 
             // 生成文件名并保存
-            var filePath = Path.Combine(ASSEMBLY_OUTPUT_PATH, $"{_assemblyDefinition.Name.Name}.dll");
+            var filePath = Path.Combine(ASSEMBLY_OUTPUT_PATH, $"{assemblyDef.Name.Name}.dll");
 
             // 确保目录存在
             var directory = Path.GetDirectoryName(filePath);
@@ -44,7 +41,7 @@ namespace FastScriptReload.Editor
                 Directory.CreateDirectory(directory);
             }
 
-            _assemblyDefinition.Write(filePath, TypeInfoHelper.WRITER_PARAMETERS);
+            assemblyDef.Write(filePath, TypeInfoHelper.WRITER_PARAMETERS);
 
             // 设置每个类型的程序集路径
             foreach (var diffResult in diffResults)
@@ -60,9 +57,9 @@ namespace FastScriptReload.Editor
             return filePath;
         }
 
-        private static void HandleAssemblyType(Dictionary<string, DiffResult> diffResults)
+        private static void HandleAssemblyType(AssemblyDefinition assemblyDef, Dictionary<string, DiffResult> diffResults)
         {
-            var mainModule = _assemblyDefinition.MainModule;
+            var mainModule = assemblyDef.MainModule;
 
             foreach (var (typeName, result) in diffResults)
             {
@@ -109,21 +106,21 @@ namespace FastScriptReload.Editor
                         var hookMethodName = methodDef.FullName;
 
                         // 复制完整的方法定义，包括方法体
-                        var newMethodDef = CopyMethod(methodDef, mainModule.ImportReference(originalType));
-
-                        if (!hookTypeInfo.ModifiedMethods.TryGetValue(hookMethodName, out var hookMethodInfo))
+                        // var newMethodDef = CopyMethod(methodDef, mainModule.ImportReference(originalType));
+                        // 将@this参数加入到方法参数列表的头部
+                        var originalTypeRef = mainModule.ImportReference(originalType);
+                        if (originalTypeRef != null && !methodDef.IsStatic)
                         {
-                            hookMethodInfo = new HookMethodInfo(hookMethodName, newMethodDef, hookMethodState);
-                            // hookMethodInfo = new HookMethodInfo(hookMethodName, methodDef, hookMethodState);
-                            hookTypeInfo.ModifiedMethods.Add(hookMethodName, hookMethodInfo);
+                            methodDef.Parameters.Insert(0, new ParameterDefinition("this", ParameterAttributes.None, originalTypeRef));
                         }
-                        else
-                        {
-                            hookMethodInfo.WrapperMethodDef = newMethodDef;
-                            // hookMethodInfo.WrapperMethodDef = methodDef;
-                        }
+                        
+                        methodDef.Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig;
+                        methodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
+                        methodDef.HasThis = false;
+                        methodDef.ExplicitThis = false;
 
-                        typeDef.Methods.Add(newMethodDef);
+                        hookTypeInfo.AddOrModifyMethod(hookMethodName, methodDef, hookMethodState);
+
                         // typeDef.Methods.Add(methodDef);
                     }
                 }
@@ -202,13 +199,13 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 清理程序集：删除未使用的类型
         /// </summary>
-        private static void ClearAssembly(Dictionary<string, DiffResult> diffResults)
+        private static void ClearAssembly(AssemblyDefinition assemblyDef, Dictionary<string, DiffResult> diffResults)
         {
-            var mainModule = _assemblyDefinition.MainModule;
+            var mainModule = assemblyDef.MainModule;
 
             // 清理编译器生成的特性
             var compilerNamespaces = new[] { "System.Runtime.CompilerServices", "Microsoft.CodeAnalysis"  };
-
+            
             void CleanupAttributesByNamespace(ICollection<CustomAttribute> attributes)
             {
                 foreach (var attr in attributes.ToArray())
@@ -220,7 +217,7 @@ namespace FastScriptReload.Editor
                     }
                 }
             }
-
+            
             CleanupAttributesByNamespace(mainModule.CustomAttributes);
             CleanupAttributesByNamespace(mainModule.Assembly.CustomAttributes);
 
@@ -267,6 +264,7 @@ namespace FastScriptReload.Editor
                         typeDef.NestedTypes.RemoveAt(i);
                     }
                 }
+                NestedTypeInfo.Clear();
 
                 typeDef.Properties.Clear();
                 typeDef.Events.Clear();
@@ -276,84 +274,6 @@ namespace FastScriptReload.Editor
         #endregion
 
         #region 方法、字段修改
-
-        /// <summary>
-        /// 复制方法，并添加this参数
-        /// </summary>
-        private static MethodDefinition CopyMethod(MethodDefinition methodDef, TypeReference originalTypeRef)
-        {
-            MethodDefinition newMethodDef = new MethodDefinition(methodDef.Name,
-                MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, methodDef.ReturnType)
-            {
-                DeclaringType = methodDef.DeclaringType,
-                IsSpecialName = methodDef.IsSpecialName,
-                IsRuntimeSpecialName = methodDef.IsRuntimeSpecialName,
-            };
-
-            newMethodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
-
-            // 复制泛型参数
-            if (methodDef.HasGenericParameters)
-            {
-                foreach (var sourceGenericParam in methodDef.GenericParameters)
-                {
-                    newMethodDef.GenericParameters.Add(sourceGenericParam);
-                }
-            }
-
-            // 将@this参数加入到方法参数列表的头部
-            if (originalTypeRef != null && !methodDef.IsStatic)
-            {
-                newMethodDef.Parameters.Add(new ParameterDefinition("this", ParameterAttributes.None, originalTypeRef));
-            }
-
-            // 复制参数
-            foreach (var param in methodDef.Parameters)
-            {
-                newMethodDef.Parameters.Add(param);
-            }
-
-            newMethodDef.Body.MaxStackSize = methodDef.Body.MaxStackSize;
-
-            if (!methodDef.HasBody)
-            {
-                return newMethodDef;
-            }
-
-            // 复制局部变量定义
-            foreach (var variable in methodDef.Body.Variables)
-            {
-                newMethodDef.Body.Variables.Add(variable);
-            }
-
-            // 复制指令
-            var sourceInstructions = methodDef.Body.Instructions;
-            var processor = newMethodDef.Body.GetILProcessor();
-
-            foreach (var sourceInst in sourceInstructions)
-            {
-                processor.Append(sourceInst);
-            }
-
-            // 复制异常处理器
-            foreach (var handler in methodDef.Body.ExceptionHandlers)
-            {
-                newMethodDef.Body.ExceptionHandlers.Add(handler);
-            }
-
-            // 复制调试信息
-            if (methodDef.DebugInformation != null)
-            {
-                foreach (var sequencePoint in methodDef.DebugInformation.SequencePoints)
-                {
-                    newMethodDef.DebugInformation.SequencePoints.Add(sequencePoint);
-                }
-
-                newMethodDef.DebugInformation.Scope = methodDef.DebugInformation.Scope;
-            }
-
-            return newMethodDef;
-        }
 
         /// <summary>
         /// 创建指令
@@ -383,7 +303,7 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
-        /// 处理方法引用
+        /// 处理方法定义和指令
         /// </summary>
         private static void HandleMethodDefinition(MethodDefinition methodDef)
         {
@@ -437,21 +357,34 @@ namespace FastScriptReload.Editor
         {
             var module = methodRef.Module;
 
-            if (HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookType))
+            foreach (var param in methodRef.Parameters)
             {
-                // 处理新增方法调用
-                if (hookType.TryGetAddedMethod(methodRef.FullName, out var addedMethodInfo))
+                param.ParameterType = GetOriginalType(param.ParameterType);
+            }
+            
+            if (methodRef.DeclaringType is GenericInstanceType genericInstanceType)
+            {
+                for (int i = 0; i < genericInstanceType.GenericArguments.Count; i++)
                 {
-                    return module.ImportReference(addedMethodInfo.WrapperMethodDef);
+                    genericInstanceType.GenericArguments[i] = GetOriginalType(genericInstanceType.GenericArguments[i]);
+                }
+            }            
+
+            methodRef.ReturnType = GetOriginalType(methodRef.ReturnType);
+
+            if (HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookTypeInfo))
+            {
+                // 处理新增/泛型方法调用
+                var methodName = methodRef.IsGenericInstance ? methodRef.GetElementMethod().FullName : methodRef.FullName;
+                if (hookTypeInfo.ModifiedMethods.TryGetValue(methodName, out var methodInfo) && methodInfo.MemberModifyState == MemberModifyState.Added)
+                {
+                    return module.ImportReference(methodInfo.WrapperMethodDef);
                 }
 
-                // 处理泛型方法调用
-                if (methodRef is GenericInstanceMethod genericMethod
-                    && hookType.ModifiedMethods.TryGetValue(methodRef.GetElementMethod().FullName, out var modifiedMethodInfo))
+                if (hookTypeInfo.TryGetMethod(methodName, out methodInfo)
+                    && (methodInfo.MemberModifyState == MemberModifyState.Added || methodRef is GenericInstanceMethod))
                 {
-                    var genericInstanceMethod = CreateGenericInstanceMethod(genericMethod, module.ImportReference(modifiedMethodInfo.WrapperMethodDef));
-
-                    return genericInstanceMethod;
+                    return methodRef;
                 }
             }
 
@@ -461,13 +394,17 @@ namespace FastScriptReload.Editor
                 NestedTypeInfo.AddMethod(methodRef);
             }
 
-            var originalMethodRef = GetOriginalMethodReference(methodRef);
-            if (originalMethodRef == null)
+            if (methodRef is GenericInstanceMethod genericInstanceMethod)
             {
-                originalMethodRef = module.ImportReference(methodRef);
+                var elementMethod = GetOriginalMethod(genericInstanceMethod.GetElementMethod());
+
+                genericInstanceMethod = CreateGenericInstanceMethod(genericInstanceMethod, module.ImportReference(elementMethod));
+                return module.ImportReference(genericInstanceMethod);
             }
 
-            return originalMethodRef;
+            methodRef = GetOriginalMethod(methodRef);
+
+            return module.ImportReference(methodRef);
         }
 
         private static GenericInstanceMethod CreateGenericInstanceMethod(GenericInstanceMethod originalMethod, MethodReference elementMethodRef)
@@ -634,7 +571,6 @@ namespace FastScriptReload.Editor
                 GenericInstanceType originalGenericInstanceType =
                     (originalTypeRef ?? typeRef.GetElementType()).MakeGenericInstanceType(genericArguments);
 
-
                 return originalGenericInstanceType;
             }
 
@@ -644,19 +580,15 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 从原程序集中获取方法引用
         /// </summary>
-        private static MethodReference GetOriginalMethodReference(MethodReference methodRef)
+        private static MethodReference GetOriginalMethod(MethodReference methodRef)
         {
             try
             {
                 var module = methodRef.Module;
 
-                var declaringTypeName = methodRef.DeclaringType.IsGenericInstance
-                    ? methodRef.DeclaringType.GetElementType().FullName
-                    : methodRef.DeclaringType.FullName;
-
                 // 从原类型中获取方法引用
                 if (methodRef.DeclaringType.Scope.Name.Equals(module.Name)
-                    && ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(declaringTypeName, out var originalType))
+                    && ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(methodRef.DeclaringType.FullName, out var originalType))
                 {
                     var originalMethodName = methodRef.IsGenericInstance
                         ? methodRef.GetElementMethod().FullName
@@ -664,30 +596,7 @@ namespace FastScriptReload.Editor
 
                     var originalMethodRef = originalType.GetMethodReference(module, originalMethodName);
 
-                    if (methodRef is GenericInstanceMethod genericInstanceMethod)
-                    {
-                        return CreateGenericInstanceMethod(genericInstanceMethod, module.ImportReference(originalMethodRef));
-                    }
-
-                    return originalMethodRef;
-                }
-
-                if (methodRef is GenericInstanceMethod genericInstanceMethod1)
-                {
-                    return CreateGenericInstanceMethod(genericInstanceMethod1, null);
-                }
-
-                if (methodRef.DeclaringType is GenericInstanceType genericInstanceType)
-                {
-                    for (int i = 0; i < genericInstanceType.GenericArguments.Count; i++)
-                    {
-                        genericInstanceType.GenericArguments[i] = GetOriginalType(genericInstanceType.GenericArguments[i]);
-                    }
-                }
-
-                foreach (var param in methodRef.Parameters)
-                {
-                    param.ParameterType = GetOriginalType(param.ParameterType);
+                    return originalMethodRef ?? methodRef;
                 }
 
                 return methodRef;

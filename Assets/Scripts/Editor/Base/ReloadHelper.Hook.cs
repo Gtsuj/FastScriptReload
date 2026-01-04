@@ -47,7 +47,7 @@ namespace FastScriptReload.Editor
                     }
 
                     // 获取 Wrapper 类型中的所有静态方法（公有和私有）
-                    var wrapperMethod = wrapperType.GetMethodByMethodDefinitionName(modifiedMethod.WrapperMethodName);
+                    var wrapperMethod = wrapperType.GetMethodByMethodDefName(modifiedMethod.WrapperMethodName);
                     
                     MethodHelper.DisableVisibilityChecks(wrapperMethod);
 
@@ -57,7 +57,7 @@ namespace FastScriptReload.Editor
                     }
                     else
                     {
-                        var originMethod = originType.GetMethodByMethodDefinitionName(modifiedMethod.MemberFullName);
+                        var originMethod = originType.GetMethodByMethodDefName(modifiedMethod.MemberFullName);
                         if (originMethod == null)
                         {
                             return;
@@ -84,7 +84,6 @@ namespace FastScriptReload.Editor
                 }
 
                 var originType = ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.GetValueOrDefault(typeFullName);
-                var originMethod = originType.GetAllMethods(_assemblyDefinition.MainModule);
 
                 foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
                 {
@@ -109,8 +108,8 @@ namespace FastScriptReload.Editor
                     }
 
                     // 获取 Wrapper 类型中的所有静态方法（公有和私有）
-                    var wrapperMethods = wrapperType.GetAllMethods(_assemblyDefinition.MainModule);
-                    if (!wrapperMethods.TryGetValue(modifiedMethod.WrapperMethodName, out var wrapperMethod))
+                    var wrapperMethod = wrapperType.GetMethodByMethodDefName(modifiedMethod.WrapperMethodName);
+                    if (wrapperMethod == null)
                     {
                         continue;
                     }
@@ -123,7 +122,7 @@ namespace FastScriptReload.Editor
                     }
                     else
                     {
-                        Hook(methodName, originMethod.GetValueOrDefault(methodName), wrapperMethod);
+                        Hook(methodName, originType.GetMethodByMethodDefName(methodName), wrapperMethod);
                     }
                 }
             }

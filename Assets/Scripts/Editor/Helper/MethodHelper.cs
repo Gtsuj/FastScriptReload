@@ -50,19 +50,11 @@ namespace FastScriptReload.Editor
         }
 #endif
 
-        public static Dictionary<string, MethodBase> GetAllMethods(this Type type, ModuleDefinition moduleDef)
-        {
-            return type.GetConstructors(AccessTools.allDeclared)
-                .Cast<MethodBase>()
-                .Concat(type.GetMethods(AccessTools.allDeclared))
-                .ToDictionary(m => moduleDef.ImportReference(m).FullName, m => m);
-        }
-
         /// <summary>
         /// 根据MethodDefinition的全称获取方法
         /// </summary>
         /// <returns>方法</returns>
-        public static MethodBase GetMethodByMethodDefinitionName(this Type type, string methodName)
+        public static MethodBase GetMethodByMethodDefName(this Type type, string methodName)
         {
             var splits = methodName.Split(" ");
             var returnTypeName = splits[0];
