@@ -569,16 +569,9 @@ namespace FastScriptReload.Editor
                         .ToDictionary(g => g.Key, g => g.GroupBy(e => e.FullFileName)
                             .Select(e => e.First().FullFileName).ToList());
 
-                    try
+                    foreach (var pair in filesByAssembly)
                     {
-                        foreach (var pair in filesByAssembly)
-                        {
-                            ReloadChangedFiles(changesAwaitingHotReload, pair.Key, pair.Value);
-                        }
-                    }
-                    finally
-                    {
-                        ReloadHelper.ClearAll();
+                        ReloadChangedFiles(changesAwaitingHotReload, pair.Key, pair.Value);
                     }
                 });
             }

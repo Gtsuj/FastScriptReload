@@ -447,10 +447,6 @@ namespace FastScriptReload.Editor
 
                 // 比较 MoveNext 方法定义
                 var res = CompareMethodDefinitions(existingMoveNext, newMoveNext);
-                if (!res)
-                {
-                    NestedTypeInfo.AddMethod(newMoveNext);
-                }
 
                 return res;
             }

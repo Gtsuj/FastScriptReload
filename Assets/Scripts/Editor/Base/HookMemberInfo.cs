@@ -85,7 +85,7 @@ namespace FastScriptReload.Editor
                     var hookedAssemblyPath = HistoricalHookedAssemblyPaths[i];
                     var assembly = System.Reflection.Assembly.LoadFrom(hookedAssemblyPath);
                     var type = assembly.GetType(TypeFullName);
-                    var method = type.GetMethodByMethodDefinitionName(WrapperMethodName);
+                    var method = type.GetMethodByMethodDefName(WrapperMethodName);
                     HistoricalHookedMethods.Add(method);
                 }
             }

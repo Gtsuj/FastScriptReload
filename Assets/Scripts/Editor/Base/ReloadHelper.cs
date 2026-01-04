@@ -73,11 +73,6 @@ namespace FastScriptReload.Editor
         public static Dictionary<string, HookTypeInfo> HookTypeInfoCache = new();
         
         /// <summary>
-        /// 当前Hook流程中编译的程序集
-        /// </summary>
-        private static AssemblyDefinition _assemblyDefinition;
-        
-        /// <summary>
         /// 初始化
         /// </summary>
         [InitializeOnLoadMethod]
@@ -108,15 +103,6 @@ namespace FastScriptReload.Editor
             };
             
             RebuildHooks();
-        }
-
-        /// <summary>
-        /// 清除所有缓存（在一次Reload流程完成后调用）
-        /// </summary>
-        public static void ClearAll()
-        {
-            _assemblyDefinition?.Dispose();
-            _assemblyDefinition = null;
         }
     }
 }
