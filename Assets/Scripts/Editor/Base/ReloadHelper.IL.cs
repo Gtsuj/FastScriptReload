@@ -82,6 +82,7 @@ namespace FastScriptReload.Editor
                 }
 
                 typeDef.Interfaces.Clear();
+                typeDef.BaseType = mainModule.ImportReference(typeof(object));
                 
                 // 处理新增字段
                 foreach (var fieldDef in typeDef.Fields)

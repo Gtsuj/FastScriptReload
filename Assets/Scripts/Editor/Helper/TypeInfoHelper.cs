@@ -24,7 +24,79 @@ namespace FastScriptReload.Editor
         
         public static readonly WriterParameters WRITER_PARAMETERS = new() { WriteSymbols = true, SymbolWriterProvider = new PortablePdbWriterProvider() };
 
-        public static ReaderParameters ReaderParameters = new() { ReadWrite = true, InMemory = true, ReadSymbols = true, SymbolReaderProvider = new PortablePdbReaderProvider() };
+        private static DefaultAssemblyResolver assemblyResolver
+        {
+            get
+            {
+                var resolver = new DefaultAssemblyResolver();
+
+                // 获取所有 Unity 程序集
+                var allAssemblies = CompilationPipeline.GetAssemblies();
+
+                // 收集所有程序集路径的目录
+                var assemblyDirectories = new HashSet<string>();
+
+                foreach (var assembly in allAssemblies)
+                {
+                    // 添加主程序集目录
+                    if (!string.IsNullOrEmpty(assembly.outputPath) && File.Exists(assembly.outputPath))
+                    {
+                        var directory = Path.GetDirectoryName(assembly.outputPath);
+                        if (!string.IsNullOrEmpty(directory))
+                        {
+                            assemblyDirectories.Add(directory);
+                        }
+                    }
+
+                    // 添加所有引用程序集的目录
+                    foreach (var reference in assembly.assemblyReferences)
+                    {
+                        if (string.IsNullOrEmpty(reference.outputPath) || !File.Exists(reference.outputPath))
+                        {
+                            continue;
+                        }
+
+                        var directory = Path.GetDirectoryName(reference.outputPath);
+                        if (!string.IsNullOrEmpty(directory))
+                        {
+                            assemblyDirectories.Add(directory);
+                        }
+                    }
+
+                    // 添加所有编译引用的目录
+                    foreach (var compiledReference in assembly.compiledAssemblyReferences)
+                    {
+                        if (string.IsNullOrEmpty(compiledReference) || !File.Exists(compiledReference))
+                        {
+                            continue;
+                        }
+
+                        var directory = Path.GetDirectoryName(compiledReference);
+                        if (!string.IsNullOrEmpty(directory))
+                        {
+                            assemblyDirectories.Add(directory);
+                        }
+                    }
+                }
+
+                // 将所有目录添加到解析器的搜索路径
+                foreach (var directory in assemblyDirectories)
+                {
+                    resolver.AddSearchDirectory(directory);
+                }
+
+                return resolver;
+            }
+        }
+
+        public static ReaderParameters ReaderParameters = new() 
+        {
+            ReadWrite = true,
+            InMemory = true,
+            ReadSymbols = true,
+            SymbolReaderProvider = new PortablePdbReaderProvider(),
+            AssemblyResolver = assemblyResolver
+        };
         
         #region 私有字段
 
