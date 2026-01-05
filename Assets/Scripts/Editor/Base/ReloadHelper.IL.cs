@@ -82,7 +82,11 @@ namespace FastScriptReload.Editor
                 }
 
                 typeDef.Interfaces.Clear();
-                typeDef.BaseType = mainModule.ImportReference(typeof(object));
+                bool setBaseType = typeDef.BaseType != null && typeDef.BaseType.FullName != "System.Object";
+                if (setBaseType)
+                {
+                    typeDef.BaseType = mainModule.ImportReference(typeof(object));
+                }
                 
                 // 处理新增字段
                 foreach (var fieldDef in typeDef.Fields)
@@ -106,8 +110,6 @@ namespace FastScriptReload.Editor
 
                         var hookMethodName = methodDef.FullName;
 
-                        // 复制完整的方法定义，包括方法体
-                        // var newMethodDef = CopyMethod(methodDef, mainModule.ImportReference(originalType));
                         // 将@this参数加入到方法参数列表的头部
                         var originalTypeRef = mainModule.ImportReference(originalType);
                         if (originalTypeRef != null && !methodDef.IsStatic)
@@ -119,6 +121,10 @@ namespace FastScriptReload.Editor
                         methodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
                         methodDef.HasThis = false;
                         methodDef.ExplicitThis = false;
+                        if (setBaseType)
+                        {
+                            methodDef.Overrides.Clear();
+                        }
 
                         hookTypeInfo.AddOrModifyMethod(hookMethodName, methodDef, hookMethodState);
 
