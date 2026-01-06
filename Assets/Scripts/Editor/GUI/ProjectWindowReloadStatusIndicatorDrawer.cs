@@ -5,7 +5,7 @@ using ImmersiveVRTools.Runtime.Common;
 using UnityEditor;
 using UnityEngine;
 
-namespace FastScriptReload.Editor.GUI
+namespace FastScriptReload.Editor
 {
     [InitializeOnLoad]
     public class ProjectWindowReloadStatusIndicatorDrawer
