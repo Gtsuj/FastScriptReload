@@ -151,7 +151,7 @@ namespace FastScriptReload.Editor
         /// <summary>
         /// 初始化并构建所有索引
         /// </summary>
-        public static async void Initialize()
+        public static async Task Initialize()
         {
             if (_isInitialized)
                 return;
@@ -206,7 +206,6 @@ namespace FastScriptReload.Editor
             LoggerScoped.LogDebug($"TypeInfo 初始化完成，耗时: {stopwatch.ElapsedMilliseconds}ms, " +
                              $"程序集数: {_assemblyCompilations.Count}, " +
                              $"方法调用关系数: {_methodCallGraph.Count}");
-
             _isInitialized = true;
         }
 
@@ -438,6 +437,8 @@ namespace FastScriptReload.Editor
                     .Select(d => d.ToString()));
 
                 LoggerScoped.LogError($"程序集 {assemblyName} 编译失败: {errorMsg}");
+                FastScriptReloadSceneOverlay.NotifyCompilationFailed(errorMsg);
+
                 return null;
             }
         }
@@ -765,7 +766,7 @@ namespace FastScriptReload.Editor
             var builder = new StringBuilder(namespaceName.Length + parts.Count * 20);
             builder.Append(namespaceName);
             builder.Append('.');
-            builder.Append(string.Join(".", parts));
+            builder.Append(string.Join("/", parts));
             return builder.ToString();
         }
         #endregion

@@ -83,47 +83,64 @@ namespace FastScriptReload.Editor
                     continue;
                 }
 
-                var originType = ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.GetValueOrDefault(typeFullName);
+                HookField(hookTypeInfo, result);
+                
+                HookMethod(hookTypeInfo, result);
+            }
+        }
 
-                foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
+        private static void HookField(HookTypeInfo hookTypeInfo, DiffResult result)
+        {
+            foreach (var (name, fieldDiffInfo) in result.AddedFields)
+            {
+                FastScriptReloadHookDetailsWindow.NotifyMemberHooked(name, true);
+            }
+        }
+
+        private static void HookMethod(HookTypeInfo hookTypeInfo, DiffResult result)
+        {
+            var typeFullName = hookTypeInfo.TypeFullName;
+            var originType = ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.GetValueOrDefault(typeFullName);
+
+            foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
+            {
+                if (!result.AddedMethods.ContainsKey(methodName) && !result.ModifiedMethods.ContainsKey(methodName))
                 {
-                    if (!result.AddedMethods.ContainsKey(methodName) && !result.ModifiedMethods.ContainsKey(methodName))
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    if (modifiedMethod.HasGenericParameters)
-                    {
-                        continue;
-                    }
+                if (modifiedMethod.HasGenericParameters)
+                {
+                    FastScriptReloadHookDetailsWindow.NotifyMemberHooked(methodName, true);
+                    continue;
+                }
 
-                    var wrapperAssembly = Assembly.LoadFrom(modifiedMethod.AssemblyPath);
+                var wrapperAssembly = Assembly.LoadFrom(modifiedMethod.AssemblyPath);
 
-                    // 从 Wrapper 程序集中找到对应的类型
-                    Type wrapperType = wrapperAssembly.GetType(typeFullName);
-                    if (wrapperType == null)
-                    {
-                        LoggerScoped.LogWarning($"在 Wrapper 程序集中找不到类型: {typeFullName}");
-                        return;
-                    }
+                // 从 Wrapper 程序集中找到对应的类型
+                Type wrapperType = wrapperAssembly.GetType(typeFullName);
+                if (wrapperType == null)
+                {
+                    LoggerScoped.LogWarning($"在 Wrapper 程序集中找不到类型: {typeFullName}");
+                    return;
+                }
 
-                    // 获取 Wrapper 类型中的所有静态方法（公有和私有）
-                    var wrapperMethod = wrapperType.GetMethodByMethodDefName(modifiedMethod.WrapperMethodName);
-                    if (wrapperMethod == null)
-                    {
-                        continue;
-                    }
+                // 获取 Wrapper 类型中的所有静态方法（公有和私有）
+                var wrapperMethod = wrapperType.GetMethodByMethodDefName(modifiedMethod.WrapperMethodName);
+                if (wrapperMethod == null)
+                {
+                    continue;
+                }
 
-                    MethodHelper.DisableVisibilityChecks(wrapperMethod);
+                MethodHelper.DisableVisibilityChecks(wrapperMethod);
 
-                    if (modifiedMethod.MemberModifyState == MemberModifyState.Added)
-                    {
-                        AddedMethodHookHandle(methodName, modifiedMethod, wrapperMethod);
-                    }
-                    else
-                    {
-                        Hook(methodName, originType.GetMethodByMethodDefName(methodName), wrapperMethod);
-                    }
+                if (modifiedMethod.MemberModifyState == MemberModifyState.Added)
+                {
+                    AddedMethodHookHandle(methodName, modifiedMethod, wrapperMethod);
+                }
+                else
+                {
+                    Hook(methodName, originType.GetMethodByMethodDefName(methodName), wrapperMethod);
                 }
             }
         }
@@ -139,11 +156,6 @@ namespace FastScriptReload.Editor
                 Hook(methodName, historicalMethod, wrapperMethod);
             }
 
-            if (modifiedMethod.HistoricalHookedMethods.Count == 0)
-            {
-                LoggerScoped.Log($"Hook Add Func Success: {methodName}");
-            }
-
             modifiedMethod.AddHistoricalHookedMethod(wrapperMethod);
         }
 
@@ -152,14 +164,14 @@ namespace FastScriptReload.Editor
             // 执行 Hook
             var errorMessage = Memory.DetourMethod(original, replacement);
 
-            if (string.IsNullOrEmpty(errorMessage))
-            {
-                LoggerScoped.Log($"Hook Success: {methodFullName}");
-            }
-            else
+            bool success = string.IsNullOrEmpty(errorMessage);
+
+            if (!string.IsNullOrEmpty(errorMessage))
             {
                 LoggerScoped.LogError($"Hook Failed: {methodFullName}, Error: {errorMessage}");
             }
+
+            FastScriptReloadHookDetailsWindow.NotifyMemberHooked(methodFullName, success, errorMessage);
         }
     }
 }

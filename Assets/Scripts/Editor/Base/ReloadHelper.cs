@@ -76,14 +76,14 @@ namespace FastScriptReload.Editor
         /// 初始化
         /// </summary>
         [InitializeOnLoadMethod]
-        public static void Init()
+        public static async void Init()
         {
             if (!(bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles.GetEditorPersistedValueOrDefault())
             {
                 return;
             }
 
-            TypeInfoHelper.Initialize();
+            FastScriptReloadSceneOverlay.NotifyInitializationStart();
             
             AssemblyReloadEvents.beforeAssemblyReload += () =>
             {
@@ -102,7 +102,11 @@ namespace FastScriptReload.Editor
                 Directory.Delete(AssemblyPath, true);
             };
             
+            await TypeInfoHelper.Initialize();
+            
             RebuildHooks();
+            
+            FastScriptReloadSceneOverlay.NotifyInitializationComplete();
         }
     }
 }

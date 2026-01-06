@@ -25,6 +25,8 @@ namespace FastScriptReload.Editor
         {
             var assemblyDef = TypeInfoHelper.CloneAssemblyDefinition(assemblyName);
 
+            NestedTypeInfo.Clear();
+
             // 修改程序集
             HandleAssemblyType(assemblyDef, diffResults);
 
@@ -70,15 +72,14 @@ namespace FastScriptReload.Editor
                     continue;
                 }
 
-                if (!HookTypeInfoCache.TryGetValue(originalType.FullName!, out var hookTypeInfo))
+                if (!HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
                 {
                     hookTypeInfo = new HookTypeInfo
                     {
-                        TypeFullName = originalType.FullName,
-                        ExistingType = originalType,
+                        TypeFullName = typeDef.FullName,
                     };
 
-                    HookTypeInfoCache.Add(originalType.FullName, hookTypeInfo);
+                    HookTypeInfoCache.Add(typeDef.FullName, hookTypeInfo);
                 }
 
                 typeDef.Interfaces.Clear();
@@ -271,7 +272,6 @@ namespace FastScriptReload.Editor
                         typeDef.NestedTypes.RemoveAt(i);
                     }
                 }
-                NestedTypeInfo.Clear();
 
                 typeDef.Properties.Clear();
                 typeDef.Events.Clear();

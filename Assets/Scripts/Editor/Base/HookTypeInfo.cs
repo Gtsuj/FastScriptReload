@@ -18,12 +18,6 @@ namespace FastScriptReload.Editor
         public string TypeFullName;
 
         /// <summary>
-        /// 原有类型
-        /// </summary>
-        [JsonIgnore]
-        public Type ExistingType { get; set; }
-
-        /// <summary>
         /// 修改的方法列表
         /// </summary>
         public Dictionary<string, HookMethodInfo> ModifiedMethods = new();
