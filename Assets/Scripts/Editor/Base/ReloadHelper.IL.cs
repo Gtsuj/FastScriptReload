@@ -364,24 +364,21 @@ namespace FastScriptReload.Editor
         {
             var module = methodRef.Module;
 
-            foreach (var param in methodRef.Parameters)
+            // 编译时创建的内部类的成员后续统一处理
+            if (TypeInfoHelper.IsCompilerGeneratedType(methodRef.DeclaringType as TypeDefinition))
             {
-                param.ParameterType = GetOriginalType(param.ParameterType);
+                NestedTypeInfo.AddMethod(methodRef);
+                return methodRef;
             }
-            
-            if (methodRef.DeclaringType is GenericInstanceType genericInstanceType)
+
+            if (!CheckMethodIsScopeInModule(methodRef))
             {
-                for (int i = 0; i < genericInstanceType.GenericArguments.Count; i++)
-                {
-                    genericInstanceType.GenericArguments[i] = GetOriginalType(genericInstanceType.GenericArguments[i]);
-                }
-            }            
+                return methodRef;
+            }
 
-            methodRef.ReturnType = GetOriginalType(methodRef.ReturnType);
-
+            // 处理新增/泛型方法调用
             if (HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookTypeInfo))
             {
-                // 处理新增/泛型方法调用
                 var methodName = methodRef.IsGenericInstance ? methodRef.GetElementMethod().FullName : methodRef.FullName;
                 if (hookTypeInfo.ModifiedMethods.TryGetValue(methodName, out var methodInfo) && methodInfo.MemberModifyState == MemberModifyState.Added)
                 {
@@ -395,36 +392,36 @@ namespace FastScriptReload.Editor
                 }
             }
 
-            // 编译时创建的内部类的成员后续统一处理
-            if (TypeInfoHelper.IsCompilerGeneratedType(methodRef.DeclaringType as TypeDefinition))
-            {
-                NestedTypeInfo.AddMethod(methodRef);
-                return methodRef;
-            }
-
+            // 处理泛型方法实例
             if (methodRef is GenericInstanceMethod genericInstanceMethod)
             {
-                var elementMethod = GetOriginalMethod(genericInstanceMethod.GetElementMethod());
+                var elementMethod = genericInstanceMethod.GetElementMethod();
+                if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(elementMethod.DeclaringType.FullName, out var originalElementType))
+                {
+                    var originalElementMethod = originalElementType.GetMethodReference(module, elementMethod.FullName);
+                    var newGenericInstanceMethod = new GenericInstanceMethod(originalElementMethod);
+                    // 添加泛型参数
+                    foreach (var typeRef in genericInstanceMethod.GenericArguments)
+                    {
+                        newGenericInstanceMethod.GenericArguments.Add(GetOriginalType(typeRef));
+                    }
 
-                genericInstanceMethod = CreateGenericInstanceMethod(genericInstanceMethod, module.ImportReference(elementMethod));
-                return module.ImportReference(genericInstanceMethod);
+                    return module.ImportReference(newGenericInstanceMethod);
+                }
             }
 
-            methodRef = GetOriginalMethod(methodRef);
-
-            return module.ImportReference(methodRef);
-        }
-
-        private static GenericInstanceMethod CreateGenericInstanceMethod(GenericInstanceMethod originalMethod, MethodReference elementMethodRef)
-        {
-            var genericInstanceMethod = new GenericInstanceMethod(elementMethodRef ?? originalMethod.GetElementMethod());
-            // 添加泛型参数
-            foreach (var typeRef in originalMethod.GenericArguments)
+            if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(methodRef.DeclaringType.FullName, out var originalType))
             {
-                genericInstanceMethod.GenericArguments.Add(GetOriginalType(typeRef));
+                var originalMethodRef = originalType.GetMethodReference(module, methodRef.FullName);
+                return module.ImportReference(originalMethodRef);
+            }
+            
+            if (methodRef.DeclaringType is GenericInstanceType)
+            {
+                methodRef.DeclaringType = GetOriginalType(methodRef.DeclaringType);
             }
 
-            return genericInstanceMethod;
+            return methodRef;
         }
 
         /// <summary>
@@ -547,6 +544,67 @@ namespace FastScriptReload.Editor
         #region 类型和方法引用处理
 
         /// <summary>
+        /// 检查类型是否定义在 Hook 程序集中（包括递归检查 TypeSpecification）
+        /// </summary>
+        private static bool CheckTypeIsScopeInModule(TypeReference typeRef)
+        {
+            if (typeRef == null)
+            {
+                return false;
+            }
+            
+            var module = typeRef.Module;
+            
+            // 泛型参数不算 Hook 程序集类型
+            if (typeRef is GenericParameter)
+            {
+                return false;
+            }
+
+            // 编译时生成的类型不需要处理
+            if (TypeInfoHelper.IsCompilerGeneratedType(typeRef as TypeDefinition))
+            {
+                return false;
+            }
+
+            // 基础类型：直接检查 Scope
+            if (typeRef.Scope.Name.Equals(module.Name))
+            {
+                return true;
+            }
+            
+            // TypeSpecification（复合类型）：需要递归检查内部类型
+            if (typeRef is TypeSpecification typeSpec)
+            {
+                // 特殊处理：泛型实例类型（需要检查泛型定义 + 所有泛型参数）
+                if (typeSpec is GenericInstanceType genericInstanceType)
+                {
+                    // 检查泛型定义（如 List<> 是否在 Hook 程序集）
+                    if (CheckTypeIsScopeInModule(genericInstanceType.GetElementType()))
+                    {
+                        return true;
+                    }
+                    
+                    // 检查所有泛型参数（如 Test 是否在 Hook 程序集）
+                    foreach (var genericArgument in genericInstanceType.GenericArguments)
+                    {
+                        if (CheckTypeIsScopeInModule(genericArgument))
+                        {
+                            return true;
+                        }
+                    }
+                    
+                    return false;
+                }
+                
+                // 其他 TypeSpecification：递归检查 ElementType
+                return CheckTypeIsScopeInModule(typeSpec.ElementType);
+            }
+            
+            return false;
+        }
+        
+        /// <summary>
         /// 获取原类型引用
         /// </summary>
         private static TypeReference GetOriginalType(TypeReference typeRef)
@@ -558,62 +616,141 @@ namespace FastScriptReload.Editor
 
             var module = typeRef.Module;
 
-            TypeReference originalTypeRef = null;
-
-            // 定义不在当前程序集的之前返回
-            if (typeRef.Scope.Name.Equals(module.Name)
-                && ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeRef.FullName, out var originalType))
+            if (!CheckTypeIsScopeInModule(typeRef))
             {
-                originalTypeRef = module.ImportReference(originalType);
+                return typeRef;
             }
 
-            if (typeRef is GenericInstanceType genericInstanceType)
+            if (typeRef is TypeSpecification typeSpec)
             {
-                TypeReference[] genericArguments = new TypeReference[genericInstanceType.GenericArguments.Count];
-
-                for (int i = 0; i < genericInstanceType.GenericArguments.Count; i++)
+                // 泛型实例类型（需要处理多个泛型参数）
+                if (typeSpec is GenericInstanceType genericInstanceType)
                 {
-                    genericArguments[i] = GetOriginalType(genericInstanceType.GenericArguments[i]);
+                    return ProcessGenericInstanceType(genericInstanceType);
                 }
 
-                GenericInstanceType originalGenericInstanceType =
-                    (originalTypeRef ?? typeRef.GetElementType()).MakeGenericInstanceType(genericArguments);
+                // 数组类型（需要保留维度信息）
+                if (typeSpec is ArrayType arrayType)
+                {
+                    return ProcessArrayType(arrayType);
+                }
 
-                return originalGenericInstanceType;
+                // 根据原类型重新构造相应的复合类型
+                var elementType = GetOriginalType(typeSpec.ElementType);
+
+                return typeSpec switch
+                {
+                    PointerType _ => new PointerType(elementType),
+                    ByReferenceType _ => new ByReferenceType(elementType),
+                    PinnedType _ => new PinnedType(elementType),
+                    RequiredModifierType reqModType => new RequiredModifierType(GetOriginalType(reqModType.ModifierType), elementType),
+                    OptionalModifierType optModType => new OptionalModifierType(GetOriginalType(optModType.ModifierType), elementType),
+                    SentinelType _ => new SentinelType(elementType),
+                    _ => typeSpec // 未知类型，保持原样
+                };
+            }
+            
+            // 尝试从原程序集中查找该类型
+            if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeRef.FullName, out var originalType))
+            {
+                // 找到原类型，导入引用并返回
+                return module.ImportReference(originalType);
             }
 
-            return originalTypeRef ?? typeRef;
+            return typeRef;
         }
 
         /// <summary>
-        /// 从原程序集中获取方法引用
+        /// 处理泛型实例类型（如 List&lt;Test&gt;、Dictionary&lt;string, Test[]&gt;）
+        /// 特殊性：除了 ElementType，还有多个 GenericArguments 需要处理
         /// </summary>
-        private static MethodReference GetOriginalMethod(MethodReference methodRef)
+        private static TypeReference ProcessGenericInstanceType(GenericInstanceType genericInstanceType)
         {
-            try
+            // 1. 递归处理泛型定义（如 List<> 本身可能也需要重定向）
+            var elementType = genericInstanceType.GetElementType();
+            var originalElementType = GetOriginalType(elementType);
+            
+            // 2. 递归处理每个泛型参数（如 Test、string、Test[] 等）
+            var genericArguments = new TypeReference[genericInstanceType.GenericArguments.Count];
+            for (int i = 0; i < genericInstanceType.GenericArguments.Count; i++)
             {
-                var module = methodRef.Module;
+                genericArguments[i] = GetOriginalType(genericInstanceType.GenericArguments[i]);
+            }
 
-                // 从原类型中获取方法引用
-                if (methodRef.DeclaringType.Scope.Name.Equals(module.Name)
-                    && ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(methodRef.DeclaringType.FullName, out var originalType))
+            // 3. 用处理后的元素类型和泛型参数重新构造泛型实例
+            return originalElementType.MakeGenericInstanceType(genericArguments);
+        }
+
+        /// <summary>
+        /// 处理数组类型（如 Test[]、Test[,]、Test[,,]）
+        /// 特殊性：需要保留数组维度信息（一维、多维）
+        /// </summary>
+        private static TypeReference ProcessArrayType(ArrayType arrayType)
+        {
+            // 递归处理数组元素类型
+            var elementType = GetOriginalType(arrayType.ElementType);
+
+            var newArrayType = new ArrayType(elementType);
+            foreach (var dimension in arrayType.Dimensions)
+            {
+                newArrayType.Dimensions.Add(dimension);
+            }
+
+            return newArrayType;
+        }
+
+        /// <summary>
+        /// 检查方法引用是否涉及 Hook 程序集（需要处理）
+        /// 检查范围：
+        /// 1. 声明类型 (DeclaringType)
+        /// 2. 返回类型 (ReturnType)
+        /// 3. 参数类型 (Parameters)
+        /// 4. 泛型参数 (GenericArguments for GenericInstanceMethod)
+        /// </summary>
+        private static bool CheckMethodIsScopeInModule(MethodReference methodRef)
+        {
+            if (methodRef == null)
+            {
+                return false;
+            }
+
+            // 1. 检查声明类型
+            if (CheckTypeIsScopeInModule(methodRef.DeclaringType))
+            {
+                return true;
+            }
+
+            // 2. 检查返回类型
+            if (CheckTypeIsScopeInModule(methodRef.ReturnType))
+            {
+                return true;
+            }
+
+            // 3. 检查参数类型
+            if (methodRef.HasParameters)
+            {
+                foreach (var param in methodRef.Parameters)
                 {
-                    var originalMethodName = methodRef.IsGenericInstance
-                        ? methodRef.GetElementMethod().FullName
-                        : methodRef.FullName;
-
-                    var originalMethodRef = originalType.GetMethodReference(module, originalMethodName);
-
-                    return originalMethodRef ?? methodRef;
+                    if (CheckTypeIsScopeInModule(param.ParameterType))
+                    {
+                        return true;
+                    }
                 }
+            }
 
-                return methodRef;
-            }
-            catch (Exception ex)
+            // 4. 检查泛型方法的泛型参数
+            if (methodRef is GenericInstanceMethod genericMethod)
             {
-                LoggerScoped.LogError($"从原程序集获取方法引用失败: {methodRef.FullName}, 错误: {ex.Message}");
-                return null;
+                foreach (var arg in genericMethod.GenericArguments)
+                {
+                    if (CheckTypeIsScopeInModule(arg))
+                    {
+                        return true;
+                    }
+                }
             }
+
+            return false;
         }
 
         #endregion
