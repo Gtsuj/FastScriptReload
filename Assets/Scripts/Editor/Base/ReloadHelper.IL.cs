@@ -395,10 +395,11 @@ namespace FastScriptReload.Editor
                 }
             }
 
-            // 内部类的方法处理
-            if (methodRef.DeclaringType.IsNested)
+            // 编译时创建的内部类的成员后续统一处理
+            if (TypeInfoHelper.IsCompilerGeneratedType(methodRef.DeclaringType as TypeDefinition))
             {
                 NestedTypeInfo.AddMethod(methodRef);
+                return methodRef;
             }
 
             if (methodRef is GenericInstanceMethod genericInstanceMethod)
@@ -466,8 +467,8 @@ namespace FastScriptReload.Editor
                 }
             }
 
-            // 内部类的字段处理
-            if (fieldRef.DeclaringType.IsNested)
+            // 编译时创建的内部类的成员后续统一处理
+            if (TypeInfoHelper.IsCompilerGeneratedType(fieldRef.DeclaringType as TypeDefinition))
             {
                 NestedTypeInfo.AddField(fieldRef);
                 processor.Append(inst);

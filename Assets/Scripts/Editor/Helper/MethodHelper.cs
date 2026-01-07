@@ -63,7 +63,8 @@ namespace FastScriptReload.Editor
             var methods = type.GetMethods(AccessTools.allDeclared);
             foreach (var methodInfo in methods)
             {
-                if (methodInfo.ResolveFullName().Contains(methodNameWithoutReturn))
+                var name = methodInfo.ResolveFullName().Replace('+', '/');
+                if (name.Contains(methodNameWithoutReturn))
                 {
                     return methodInfo;
                 }
@@ -72,7 +73,8 @@ namespace FastScriptReload.Editor
             var constructors = type.GetConstructors(AccessTools.allDeclared);
             foreach (var constructorInfo in constructors)
             {
-                if (constructorInfo.ResolveFullName().Contains(methodNameWithoutReturn))
+                var name = constructorInfo.ResolveFullName().Replace('+', '/');
+                if (name.Contains(methodNameWithoutReturn))
                 {
                     return constructorInfo;
                 }
