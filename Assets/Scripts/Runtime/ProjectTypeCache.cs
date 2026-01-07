@@ -32,15 +32,32 @@ namespace FastScriptReload.Runtime
                 typeLookupSw.Start();
 
                 _allTypesInNonDynamicGeneratedAssemblies = AppDomain.CurrentDomain.GetAssemblies()
+                    .Where(a => !a.IsDynamic) // 过滤掉动态生成的程序集
                     .SelectMany(a => a.GetTypes())
+                    .Where(t => !IsCompilerGeneratedType(t)) // 过滤掉编译器生成的类型
                     .GroupBy(t => t.FullName)
                     .Select(g => g.First()) //TODO: quite odd that same type full name can be defined multiple times? eg Microsoft.CodeAnalysis.EmbeddedAttribute throws 'An item with the same key has already been added' 
-                    .ToDictionary(t => t.FullName, t => t);
+                    .ToDictionary(t => t.IsNested ? t.FullName.Replace('+', '/') : t.FullName, t => t);
                     
 #if ImmersiveVrTools_DebugEnabled
                 ImmersiveVrToolsCommon.Runtime.Logging.LoggerScoped.Log($"Initialized type-lookup dictionary, took: {typeLookupSw.ElapsedMilliseconds}ms - cached");
 #endif
             }
+        }
+
+        /// <summary>
+        /// 检查类型是否是编译器生成的类型
+        /// 所有编译器生成的类型（状态机、闭包类、迭代器等）都会标记 CompilerGeneratedAttribute
+        /// </summary>
+        private static bool IsCompilerGeneratedType(Type type)
+        {
+            if (type == null)
+            {
+                return false;
+            }
+
+            // 检查是否有 CompilerGenerated 特性
+            return type.GetCustomAttributes(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false).Length > 0;
         }
 
     }

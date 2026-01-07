@@ -475,6 +475,27 @@ namespace FastScriptReload.Editor
             return typeDef.Interfaces.Any(implementation => implementation.InterfaceType.FullName.Equals("System.Runtime.CompilerServices.IAsyncStateMachine"));
         }
 
+        /// <summary>
+        /// 检查类型是否是编译器生成的类型
+        /// 所有编译器生成的类型（状态机、闭包类、迭代器等）都会标记 CompilerGeneratedAttribute
+        /// </summary>
+        public static bool IsCompilerGeneratedType(TypeDefinition typeDef)
+        {
+            if (typeDef == null)
+            {
+                return false;
+            }
+
+            if (!typeDef.IsNested)
+            {
+                return false;
+            }
+
+            // 检查是否有 CompilerGenerated 特性
+            return typeDef.CustomAttributes.Any(attr => 
+                attr.AttributeType.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute");
+        }
+
         #endregion
 
         #region 私有实现方法
