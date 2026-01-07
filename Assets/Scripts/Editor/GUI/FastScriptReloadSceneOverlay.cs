@@ -16,7 +16,8 @@ namespace FastScriptReload.Editor
         WaitingForChanges, // 等待代码改变
         Hooking, // Hook中
         Completed, // 完成
-        CompilationFailed // 编译失败
+        Failed, // 失败（包括编译失败和Hook失败）
+        NoChange // 无变化（文件已编译但没有需要Hook的变化）
     }
 
     /// <summary>
@@ -115,19 +116,31 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
-        /// 通知编译失败
+        /// 通知Hook失败（包括编译失败和Hook失败）
         /// </summary>
-        /// <param name="errorMessage">编译错误信息</param>
-        public static void NotifyCompilationFailed(string errorMessage)
+        /// <param name="errorMessage">错误信息</param>
+        public static void NotifyHookFailed(string errorMessage)
         {
             lock (STATE_LOCK)
             {
-                _currentStateInfo.State = HotReloadState.CompilationFailed;
+                _currentStateInfo.State = HotReloadState.Failed;
                 _currentStateInfo.LastUpdateTime = DateTime.Now;
             }
 
-            // 通知DetailsWindow编译失败
-            FastScriptReloadHookDetailsWindow.NotifyCompilationFailed(errorMessage);
+            // 通知DetailsWindow Hook失败
+            FastScriptReloadHookDetailsWindow.NotifyHookFailed(errorMessage);
+        }
+
+        /// <summary>
+        /// 通知无变化（文件已编译但没有需要Hook的变化）
+        /// </summary>
+        public static void NotifyNoChange()
+        {
+            lock (STATE_LOCK)
+            {
+                _currentStateInfo.State = HotReloadState.NoChange;
+                _currentStateInfo.LastUpdateTime = DateTime.Now;
+            }
         }
 
         /// <summary>
@@ -286,18 +299,22 @@ namespace FastScriptReload.Editor
                     UpdateCompletedState(stateInfo);
                     break;
 
-                case HotReloadState.CompilationFailed:
-                    UpdateCompilationFailedState();
+                case HotReloadState.Failed:
+                    UpdateFailedState();
+                    break;
+
+                case HotReloadState.NoChange:
+                    UpdateNoChangeState();
                     break;
             }
         }
 
-        private void UpdateCompilationFailedState()
+        private void UpdateFailedState()
         {
             // 隐藏转圈动画
             _spinnerElement.style.display = DisplayStyle.None;
 
-            _statusLabel.text = "✗ Compilation Failed";
+            _statusLabel.text = "✗ Hook Failed";
             _statusLabel.style.color = new Color(1f, 0.3f, 0.3f); // 红色
 
             _hookCountLabel.text = "";
@@ -378,6 +395,20 @@ namespace FastScriptReload.Editor
             _detailsButton.style.display = DisplayStyle.Flex;
 
             _root.style.backgroundColor = new Color(0.15f, 0.25f, 0.15f, 0.9f); // 深绿色背景
+        }
+
+        private void UpdateNoChangeState()
+        {
+            // 隐藏转圈动画
+            _spinnerElement.style.display = DisplayStyle.None;
+
+            _statusLabel.text = "ℹ No Change";
+            _statusLabel.style.color = new Color(0.7f, 0.7f, 0.3f); // 黄色
+
+            _hookCountLabel.text = "File compiled with no hooks needed";
+
+            _detailsButton.style.display = DisplayStyle.None;
+            _root.style.backgroundColor = new Color(0.25f, 0.25f, 0.15f, 0.9f); // 深黄色背景
         }
     }
 }

@@ -436,8 +436,9 @@ namespace FastScriptReload.Editor
                     .Where(d => d.Severity == DiagnosticSeverity.Error)
                     .Select(d => d.ToString()));
 
-                LoggerScoped.LogError($"程序集 {assemblyName} 编译失败: {errorMsg}");
-                FastScriptReloadSceneOverlay.NotifyCompilationFailed(errorMsg);
+                errorMsg = $"程序集 {assemblyName} 编译失败: {errorMsg}";
+                LoggerScoped.LogError(errorMsg);
+                FastScriptReloadSceneOverlay.NotifyHookFailed(errorMsg);
 
                 return null;
             }

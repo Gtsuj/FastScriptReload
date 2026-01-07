@@ -42,8 +42,8 @@ namespace FastScriptReload.Editor
             public List<string> HookedMembers { get; set; } = new List<string>(); // Hook的成员（方法、字段、属性等）
             public Dictionary<string, string> MemberErrors { get; set; } = new Dictionary<string, string>(); // 成员错误信息（成员名 -> 错误信息）
             public bool IsCompleted { get; set; } = false; // 标记事件是否已完成
-            public bool IsCompilationFailed { get; set; } = false; // 标记是否为编译失败事件
-            public string CompilationError { get; set; } = null; // 编译错误信息
+            public bool IsFailed { get; set; } = false; // 标记是否为失败事件（包括编译失败和Hook失败）
+            public string FailureReason { get; set; } = null; // 失败原因信息
         }
 
         // 当前正在构建的事件
@@ -137,32 +137,32 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
-        /// 通知编译失败
+        /// 通知Hook失败（包括编译失败和Hook失败）
         /// </summary>
-        /// <param name="errorMessage">编译错误信息</param>
-        public static void NotifyCompilationFailed(string errorMessage)
+        /// <param name="errorMessage">错误信息</param>
+        public static void NotifyHookFailed(string errorMessage)
         {
             lock (EVENT_LOCK)
             {
-                // 如果当前有正在构建的事件，标记为编译失败
+                // 如果当前有正在构建的事件，标记为失败
                 if (_currentEvent != null && !_currentEvent.IsCompleted)
                 {
-                    _currentEvent.IsCompilationFailed = true;
-                    _currentEvent.CompilationError = errorMessage;
+                    _currentEvent.IsFailed = true;
+                    _currentEvent.FailureReason = errorMessage;
                     _currentEvent.IsCompleted = true;
                     _currentEvent = null; // 清空当前事件
                 }
                 else
                 {
-                    // 创建一个新的编译失败事件
+                    // 创建一个新的失败事件
                     var reloadEvent = new ReloadEvent
                     {
                         Timestamp = DateTime.Now,
                         HookedMembers = new List<string>(),
                         MemberErrors = new Dictionary<string, string>(),
                         IsCompleted = true,
-                        IsCompilationFailed = true,
-                        CompilationError = errorMessage
+                        IsFailed = true,
+                        FailureReason = errorMessage
                     };
                     EVENT_HISTORY.Insert(0, reloadEvent);
                 }
@@ -409,10 +409,10 @@ namespace FastScriptReload.Editor
             List<ReloadEvent> events;
             lock (EVENT_LOCK)
             {
-                // 过滤掉没有成员且不是编译失败的事件
+                // 过滤掉没有成员且不是失败的事件
                 events = EVENT_HISTORY.Where(e => 
                     (e.HookedMembers != null && e.HookedMembers.Count > 0) || 
-                    e.IsCompilationFailed).ToList();
+                    e.IsFailed).ToList();
             }
 
             if (events.Count == 0)
@@ -449,16 +449,16 @@ namespace FastScriptReload.Editor
             GUILayout.BeginHorizontal();
             
             // 根据事件类型显示不同的图标和文本
-            if (reloadEvent.IsCompilationFailed)
+            if (reloadEvent.IsFailed)
             {
-                // 编译失败：红色 X 图标
+                // 失败：红色 X 图标
                 var errorTitleStyle = new GUIStyle(_eventTitleStyle)
                 {
                     normal = { textColor = new Color(1f, 0.3f, 0.3f) }
                 };
                 GUILayout.Label("✗", errorTitleStyle, GUILayout.Width(16));
                 GUILayout.Space(4);
-                GUILayout.Label("Compilation failed", errorTitleStyle);
+                GUILayout.Label("Hook failed", errorTitleStyle);
             }
             else
             {
@@ -485,8 +485,8 @@ namespace FastScriptReload.Editor
 
             GUILayout.Space(4);
             
-            // 如果是编译失败事件，显示编译错误信息
-            if (reloadEvent.IsCompilationFailed && !string.IsNullOrEmpty(reloadEvent.CompilationError))
+            // 如果是失败事件，显示错误信息
+            if (reloadEvent.IsFailed && !string.IsNullOrEmpty(reloadEvent.FailureReason))
             {
                 GUILayout.BeginHorizontal();
                 GUILayout.Space(-10);
@@ -496,7 +496,7 @@ namespace FastScriptReload.Editor
                 {
                     normal = { textColor = new Color(1f, 0.3f, 0.3f) }
                 };
-                GUILayout.Label("Compilation Error", errorLabelStyle);
+                GUILayout.Label("Error Details", errorLabelStyle);
                 
                 GUILayout.EndHorizontal();
                 
@@ -512,7 +512,7 @@ namespace FastScriptReload.Editor
                     fontSize = 14,
                     normal = { textColor = new Color(1f, 0.5f, 0.5f) }
                 };
-                GUILayout.TextArea(reloadEvent.CompilationError, errorTextStyle);
+                GUILayout.TextArea(reloadEvent.FailureReason, errorTextStyle);
                 
                 GUILayout.EndVertical();
                 GUILayout.EndHorizontal();
