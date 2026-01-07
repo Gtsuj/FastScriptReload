@@ -38,6 +38,11 @@ namespace FastScriptReload.Editor
                         continue;
                     }
 
+                    if (string.IsNullOrEmpty(modifiedMethod.AssemblyPath) || !File.Exists(modifiedMethod.AssemblyPath))
+                    {
+                        continue;
+                    }
+
                     var wrapperAssembly = Assembly.LoadFrom(modifiedMethod.AssemblyPath);
                     Type wrapperType = wrapperAssembly.GetType(typeFullName);
                     if (wrapperType == null)
@@ -156,6 +161,11 @@ namespace FastScriptReload.Editor
                 Hook(methodName, historicalMethod, wrapperMethod);
             }
 
+            if (modifiedMethod.HistoricalHookedMethods.Count == 0)
+            {
+                FastScriptReloadHookDetailsWindow.NotifyMemberHooked(methodName, true);
+            }
+            
             modifiedMethod.AddHistoricalHookedMethod(wrapperMethod);
         }
 
