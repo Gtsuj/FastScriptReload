@@ -73,6 +73,11 @@ namespace FastScriptReload.Editor
         [OnDeserialized]
         private void OnDeserialized(StreamingContext context)
         {
+            if (string.IsNullOrEmpty(AssemblyPath))
+            {
+                return;
+            }
+
             AssemblyDefinition assemblyDefinition = AssemblyDefinition.ReadAssembly(AssemblyPath);
             var typeDef = assemblyDefinition.MainModule.GetType(TypeFullName);
             WrapperMethodDef = typeDef.Methods.FirstOrDefault(m => m.FullName == WrapperMethodName);
@@ -89,6 +94,8 @@ namespace FastScriptReload.Editor
                     HistoricalHookedMethods.Add(method);
                 }
             }
+
+            assemblyDefinition.Dispose();
         }
 
         public void AddHistoricalHookedMethod(MethodBase methodBase)
