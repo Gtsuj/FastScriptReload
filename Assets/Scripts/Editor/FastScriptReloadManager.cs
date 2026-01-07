@@ -341,6 +341,10 @@ namespace FastScriptReload.Editor
                 if (diffResults == null)
                 {
                     changesAwaitingHotReload.ForEach(c => c.ErrorOn = DateTime.UtcNow);
+                    
+                    // 通知SceneOverlay显示无变化状态
+                    FastScriptReloadSceneOverlay.NotifyNoChange();
+                    
                     return;
                 }
 
@@ -372,7 +376,9 @@ namespace FastScriptReload.Editor
             }
             catch (Exception ex)
             {
-                LoggerScoped.LogError($"Error when updating files: '{(files != null ? string.Join(",", files.Select(fn => new FileInfo(fn).Name)) : "unknown")}', {ex}");
+                var errorMsg = $"Error when updating files: '{(files != null ? string.Join(",", files.Select(fn => new FileInfo(fn).Name)) : "unknown")}', {ex}";
+                LoggerScoped.LogError(errorMsg);
+                FastScriptReloadHookDetailsWindow.NotifyHookFailed(errorMsg);
 
                 changesAwaitingHotReload.ForEach(c =>
                 {
