@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using FastScriptReload.Editor;
 using FastScriptReload.Runtime;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Mono.Cecil;
@@ -24,12 +25,21 @@ namespace FastScriptReload.Editor
         {
             TypeInfoHelper.UpdateSyntaxTrees(assemblyName, files);
 
-            if (TypeInfoHelper.Compile(assemblyName) == null)
+            var assemblyDef = TypeInfoHelper.Compile(assemblyName);
+            if (assemblyDef == null)
             {
                 return null;
             }
 
-            return DiffAssembly(assemblyName, files);
+            var diffResult = DiffAssembly(assemblyName, files, assemblyDef);
+            if (diffResult == null)
+            {
+                return null;
+            }
+            
+            TypeInfoHelper.AddAssemblyDefinition(assemblyName, assemblyDef);
+
+            return diffResult;
         }
 
         /// <summary>
@@ -37,12 +47,13 @@ namespace FastScriptReload.Editor
         /// </summary>
         /// <param name="assemblyName">程序集名称</param>
         /// <param name="files">修改的文件路径列表</param>
+        /// <param name="newAssemblyDef"></param>
         /// <returns>类型差异结果字典，Key为类型全名，Value为差异结果</returns>
-        public static Dictionary<string, DiffResult> DiffAssembly(string assemblyName, List<string> files)
+        private static Dictionary<string, DiffResult> DiffAssembly(string assemblyName, List<string> files, AssemblyDefinition newAssemblyDef)
         {
             // 获取最后两个程序集版本
-            var newAssemblyDef = TypeInfoHelper.GetAssemblyDefinition(assemblyName, -1);
-            var oldAssemblyDef = TypeInfoHelper.GetAssemblyDefinition(assemblyName, -2);
+
+            var oldAssemblyDef = TypeInfoHelper.GetAssemblyDefinition(assemblyName, -1);
             if (newAssemblyDef == null || oldAssemblyDef == null)
             {
                 LoggerScoped.LogError($"无法获取程序集 {assemblyName} ");
@@ -82,10 +93,10 @@ namespace FastScriptReload.Editor
                     {
                         if (!method.IsConstructor && !method.IsGetter && !method.IsSetter)
                         {
-                            diffResult.AddedMethods[method.FullName] = new MethodDiffInfo
+                            diffResult.ModifiedMethods[method.FullName] = new MethodDiffInfo
                             {
                                 FullName = method.FullName,
-                                IsGenericMethod = method.HasGenericParameters
+                                ModifyState = MemberModifyState.Added
                             };
                         }
                     }
@@ -99,7 +110,7 @@ namespace FastScriptReload.Editor
                         };
                     }
 
-                    if (diffResult.AddedMethods.Count > 0 || diffResult.AddedFields.Count > 0)
+                    if (diffResult.ModifiedMethods.Count > 0 || diffResult.AddedFields.Count > 0)
                     {
                         diffResults[typeFullName] = diffResult;
                     }
@@ -111,8 +122,7 @@ namespace FastScriptReload.Editor
                 diffResult = CompareTypesWithCecil(oldTypeDef, newTypeDef, typeFullName);
 
                 if (diffResult != null &&
-                    (diffResult.AddedMethods.Count > 0 ||
-                     diffResult.ModifiedMethods.Count > 0 ||
+                    (diffResult.ModifiedMethods.Count > 0 ||
                      diffResult.AddedFields.Count > 0))
                 {
                     diffResults[typeFullName] = diffResult;
@@ -155,6 +165,7 @@ namespace FastScriptReload.Editor
                             callerDiffResult.ModifiedMethods.Add(callerMethodName, new MethodDiffInfo()
                             {
                                 FullName = callerMethodName,
+                                ModifyState = MemberModifyState.Modified,
                                 MethodDefinition = methodCallInfo.MethodDef
                             });
                         }
@@ -185,10 +196,10 @@ namespace FastScriptReload.Editor
             {
                 if (!oldMethodMap.ContainsKey(methodName))
                 {
-                    diffResult.AddedMethods[methodName] = new MethodDiffInfo
+                    diffResult.ModifiedMethods[methodName] = new MethodDiffInfo
                     {
                         FullName = methodName,
-                        IsGenericMethod = newMethodDef.HasGenericParameters,
+                        ModifyState = MemberModifyState.Added,
                         MethodDefinition = newMethodDef
                     };
                     LoggerScoped.LogDebug($"发现新增的方法: {methodName}");
@@ -209,7 +220,7 @@ namespace FastScriptReload.Editor
                     diffResult.ModifiedMethods[methodName] = new MethodDiffInfo
                     {
                         FullName = methodName,
-                        IsGenericMethod = newMethodDef.HasGenericParameters,
+                        ModifyState = MemberModifyState.Modified,
                         MethodDefinition = newMethodDef
                     };
                     LoggerScoped.LogDebug($"发现修改的方法: {methodName}");
@@ -462,11 +473,6 @@ namespace FastScriptReload.Editor
 public class DiffResult
 {
     /// <summary>
-    /// 新增的方法
-    /// </summary>
-    public Dictionary<string, MethodDiffInfo> AddedMethods { get; } = new();
-
-    /// <summary>
     /// 修改的方法
     /// </summary>
     public Dictionary<string, MethodDiffInfo> ModifiedMethods { get; } = new();
@@ -488,9 +494,9 @@ public class MethodDiffInfo
     public string FullName { get; set; }
 
     /// <summary>
-    /// 是否为泛型方法
+    /// 修改状态
     /// </summary>
-    public bool IsGenericMethod { get; set; }
+    public MemberModifyState ModifyState { get; set; }
 
     /// <summary>
     /// 方法声明类型

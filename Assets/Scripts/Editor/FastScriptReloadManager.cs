@@ -378,7 +378,7 @@ namespace FastScriptReload.Editor
             {
                 var errorMsg = $"Error when updating files: '{(files != null ? string.Join(",", files.Select(fn => new FileInfo(fn).Name)) : "unknown")}', {ex}";
                 LoggerScoped.LogError(errorMsg);
-                FastScriptReloadHookDetailsWindow.NotifyHookFailed(errorMsg);
+                FastScriptReloadSceneOverlay.NotifyHookFailed(errorMsg);
 
                 changesAwaitingHotReload.ForEach(c =>
                 {
