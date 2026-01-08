@@ -11,7 +11,7 @@
     "allowUnsafeCode": true,
     "overrideReferences": true,
     "precompiledReferences": [
-        "0Harmony.dll",
+        "0Harmony-2.2.2.dll",
         "Microsoft.CodeAnalysis.FSR.dll",
         "Microsoft.CodeAnalysis.CSharp.FSR.dll",
         "ImmersiveVRTools.Common.Editor.dll",
