@@ -211,8 +211,15 @@ Output: '<filepath>.SourceCodeCombined.cs(940,1): error CS1027: #endif directive
                         using (new EditorGUI.DisabledGroupScope((bool)FastScriptReloadPreference.WatchOnlySpecified.GetEditorPersistedValueOrDefault()))
                         using (LayoutHelper.LabelWidth(320))
                         {
-                            ProductPreferenceBase.RenderGuiAndPersistInput(FastScriptReloadPreference.EnableAutoReloadForChangedFiles);
+                            // 手动渲染 EnableAutoReloadForChangedFiles 的 Toggle
+                            var oldValue = FastScriptReloadPreference.EnableAutoReloadForChangedFiles;
+                            var newValue = EditorGUILayout.Toggle("启用自动热重载", oldValue);
+                            if (newValue != oldValue)
+                            {
+                                FastScriptReloadPreference.EnableAutoReloadForChangedFiles = newValue;
+                            }
                         }
+                        
                         GUILayout.Space(sectionBreakHeight);
 
                         using (LayoutHelper.LabelWidth(320))

@@ -263,7 +263,7 @@ namespace FastScriptReload.Editor
                 EnsureInitialized();
             }
 
-            if ((bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles.GetEditorPersistedValueOrDefault() &&
+            if (FastScriptReloadPreference.EnableAutoReloadForChangedFiles &&
                 (DateTime.UtcNow - _lastTimeChangeBatchRun).TotalSeconds > (int)FastScriptReloadPreference.BatchScriptChangesAndReloadEveryNSeconds.GetEditorPersistedValueOrDefault())
             {
                 TriggerReloadForChangedFiles();
@@ -490,7 +490,7 @@ Workaround will search in all folders (under project root) and will use first fo
         private static bool HotReloadDisabled_WarningMessageShownAlready;
         private static void EnsureInitialized()
         {
-            if (!(bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles.GetEditorPersistedValueOrDefault()
+            if (!FastScriptReloadPreference.EnableAutoReloadForChangedFiles
                 && !(bool)FastScriptReloadPreference.WatchOnlySpecified.GetEditorPersistedValueOrDefault())
             {
                 if (!HotReloadDisabled_WarningMessageShownAlready)
