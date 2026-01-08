@@ -63,13 +63,13 @@ namespace FastScriptReload.Editor
 
         public void SetAssemblyPath(string assemblyPath, DiffResult diffResult)
         {
-            foreach (var (_, methodInfo) in diffResult.AddedMethods)
-            {
-                if (ModifiedMethods.TryGetValue(methodInfo.FullName, out var modifiedMethodInfo))
-                {
-                    modifiedMethodInfo.AssemblyPath = assemblyPath;
-                }
-            }
+            // foreach (var (_, methodInfo) in diffResult.AddedMethods)
+            // {
+            //     if (ModifiedMethods.TryGetValue(methodInfo.FullName, out var modifiedMethodInfo))
+            //     {
+            //         modifiedMethodInfo.AssemblyPath = assemblyPath;
+            //     }
+            // }
 
             foreach (var (_, methodInfo) in diffResult.ModifiedMethods)
             {

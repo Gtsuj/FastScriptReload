@@ -67,11 +67,6 @@ namespace FastScriptReload.Editor
             {
                 var typeDef = mainModule.GetType(typeName);
 
-                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeDef.FullName, out var originalType))
-                {
-                    continue;
-                }
-
                 if (!HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
                 {
                     hookTypeInfo = new HookTypeInfo
@@ -98,44 +93,35 @@ namespace FastScriptReload.Editor
                     }
                 }
 
-                // 预注册方法（复制修改的方法内容）
-                void PreRegisterMethods(Dictionary<string, MethodDiffInfo> methodDiffInfos, MemberModifyState hookMethodState)
+                // 处理原方法
+                for (int i = typeDef.Methods.Count - 1; i >= 0; i--)
                 {
-                    for (int i = typeDef.Methods.Count - 1; i >= 0; i--)
+                    var methodDef = typeDef.Methods[i];
+                    if (!result.ModifiedMethods.TryGetValue(methodDef.FullName, out var methodDiffInfo))
                     {
-                        var methodDef = typeDef.Methods[i];
-                        if (!methodDiffInfos.TryGetValue(methodDef.FullName, out var methodDiffInfo))
-                        {
-                            continue;
-                        }
+                        continue;
+                    }
 
-                        var hookMethodName = methodDef.FullName;
+                    var hookMethodName = methodDef.FullName;
 
-                        // 将@this参数加入到方法参数列表的头部
-                        var originalTypeRef = mainModule.ImportReference(originalType);
-                        if (originalTypeRef != null && !methodDef.IsStatic)
-                        {
-                            methodDef.Parameters.Insert(0, new ParameterDefinition("this", ParameterAttributes.None, originalTypeRef));
-                        }
-                        
-                        methodDef.Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig;
-                        methodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
+                    methodDef.Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig;
+                    methodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
+
+                    // 将@this参数加入到方法参数列表的头部
+                    if (!methodDef.IsStatic)
+                    {
+                        methodDef.Parameters.Insert(0, new ParameterDefinition("this", ParameterAttributes.None, typeDef));
                         methodDef.HasThis = false;
                         methodDef.ExplicitThis = false;
-                        if (setBaseType)
-                        {
-                            methodDef.Overrides.Clear();
-                        }
-
-                        hookTypeInfo.AddOrModifyMethod(hookMethodName, methodDef, hookMethodState);
-
-                        // typeDef.Methods.Add(methodDef);
                     }
-                }
+                        
+                    if (setBaseType)
+                    {
+                        methodDef.Overrides.Clear();
+                    }
 
-                // 预注册添加和修改的方法
-                PreRegisterMethods(result.AddedMethods, MemberModifyState.Added);
-                PreRegisterMethods(result.ModifiedMethods, MemberModifyState.Modified);
+                    hookTypeInfo.AddOrModifyMethod(hookMethodName, methodDef, methodDiffInfo.ModifyState);
+                }
             }
 
             // 处理方法引用
@@ -147,27 +133,16 @@ namespace FastScriptReload.Editor
                 {
                     continue;
                 }
-                
-                if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeDef.FullName, out var originalType))
-                {
-                    continue;
-                }
 
-                void HandleMethod(Dictionary<string, MethodDiffInfo> methodDiffInfos)
+                foreach (var (methodFullName, _) in result.ModifiedMethods)
                 {
-                    foreach (var (methodFullName, _) in methodDiffInfos)
+                    if (!hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var hookMethodInfo))
                     {
-                        if (!hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var hookMethodInfo))
-                        {
-                            continue;
-                        }
-
-                        HandleMethodDefinition(hookMethodInfo.WrapperMethodDef);
+                        continue;
                     }
-                }
 
-                HandleMethod(result.AddedMethods);
-                HandleMethod(result.ModifiedMethods);
+                    HandleMethodDefinition(hookMethodInfo.WrapperMethodDef);
+                }
             }
 
             // 处理内部类
@@ -243,8 +218,7 @@ namespace FastScriptReload.Editor
                 if (HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
                 {
                     typeDef.Methods.Clear();
-                    var methodNamesToAdd = result.ModifiedMethods.Concat(result.AddedMethods);
-                    foreach (var (methodFullName, _) in methodNamesToAdd)
+                    foreach (var (methodFullName, _) in result.ModifiedMethods)
                     {
                         if (hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var modifiedMethod))
                         {
@@ -392,36 +366,46 @@ namespace FastScriptReload.Editor
                 }
             }
 
+            MethodReference CopyMethodReference(MethodReference targetMethodRef)
+            {
+                var newMethodRef = new MethodReference(targetMethodRef.Name, GetOriginalType(targetMethodRef.ReturnType), GetOriginalType(targetMethodRef.DeclaringType))
+                {
+                    HasThis = targetMethodRef.HasThis,
+                    ExplicitThis = targetMethodRef.ExplicitThis,
+                    CallingConvention = targetMethodRef.CallingConvention
+                };
+                
+                // 添加参数
+                foreach (var parameter in targetMethodRef.Parameters)
+                {
+                    newMethodRef.Parameters.Add(new ParameterDefinition(GetOriginalType(parameter.ParameterType)));
+                }
+
+                // 泛型参数
+                foreach (var parameter in targetMethodRef.GenericParameters)
+                {
+                    newMethodRef.GenericParameters.Add(new GenericParameter(parameter.Name, parameter.Owner));
+                }                
+
+                return newMethodRef;
+            }
+            
             // 处理泛型方法实例
             if (methodRef is GenericInstanceMethod genericInstanceMethod)
             {
                 var elementMethod = genericInstanceMethod.GetElementMethod();
-                if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(elementMethod.DeclaringType.FullName, out var originalElementType))
+
+                var newGenericInstanceMethod = new GenericInstanceMethod(CopyMethodReference(elementMethod));
+                // 添加泛型参数
+                foreach (var typeRef in genericInstanceMethod.GenericArguments)
                 {
-                    var originalElementMethod = originalElementType.GetMethodReference(module, elementMethod.FullName);
-                    var newGenericInstanceMethod = new GenericInstanceMethod(originalElementMethod);
-                    // 添加泛型参数
-                    foreach (var typeRef in genericInstanceMethod.GenericArguments)
-                    {
-                        newGenericInstanceMethod.GenericArguments.Add(GetOriginalType(typeRef));
-                    }
-
-                    return module.ImportReference(newGenericInstanceMethod);
+                    newGenericInstanceMethod.GenericArguments.Add(GetOriginalType(typeRef));
                 }
+
+                return module.ImportReference(newGenericInstanceMethod);
             }
 
-            if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(methodRef.DeclaringType.FullName, out var originalType))
-            {
-                var originalMethodRef = originalType.GetMethodReference(module, methodRef.FullName);
-                return module.ImportReference(originalMethodRef);
-            }
-            
-            if (methodRef.DeclaringType is GenericInstanceType)
-            {
-                methodRef.DeclaringType = GetOriginalType(methodRef.DeclaringType);
-            }
-
-            return methodRef;
+            return CopyMethodReference(methodRef);
         }
 
         /// <summary>
@@ -448,8 +432,7 @@ namespace FastScriptReload.Editor
                         return;
                     case Code.Stfld:
                     case Code.Stsfld:
-                        if (methodDefIsConstructor 
-                            && ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(fieldRef.DeclaringType.FullName, out var ownerType))
+                        if (methodDefIsConstructor && ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(fieldRef.DeclaringType.FullName, out var ownerType))
                         {
                             var fieldValue = inst.Previous.Operand;
                             var fieldType = fieldValue.GetType();
@@ -683,7 +666,6 @@ namespace FastScriptReload.Editor
 
         /// <summary>
         /// 处理数组类型（如 Test[]、Test[,]、Test[,,]）
-        /// 特殊性：需要保留数组维度信息（一维、多维）
         /// </summary>
         private static TypeReference ProcessArrayType(ArrayType arrayType)
         {

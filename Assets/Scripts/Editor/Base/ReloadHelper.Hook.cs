@@ -109,7 +109,7 @@ namespace FastScriptReload.Editor
 
             foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
             {
-                if (!result.AddedMethods.ContainsKey(methodName) && !result.ModifiedMethods.ContainsKey(methodName))
+                if (!result.ModifiedMethods.ContainsKey(methodName))
                 {
                     continue;
                 }

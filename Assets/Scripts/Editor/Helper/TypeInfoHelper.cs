@@ -272,7 +272,7 @@ namespace FastScriptReload.Editor
 
             // 步骤1：收集所有 Added 和 Modified 的方法
             var modifyMethods = diffResults.Values
-                .SelectMany(diffResult => diffResult.AddedMethods.Values.Concat(diffResult.ModifiedMethods.Values)).ToArray();
+                .SelectMany(diffResult => diffResult.ModifiedMethods.Values).ToArray();
 
             if (modifyMethods.Length == 0)
             {
@@ -373,6 +373,12 @@ namespace FastScriptReload.Editor
             return list[index];
         }
 
+        public static void AddAssemblyDefinition(string assemblyName, AssemblyDefinition assemblyDef)
+        {
+            var list = _assemblyDefinitions.GetValueOrDefault(assemblyName, new List<AssemblyDefinition>());
+            list.Add(assemblyDef);
+        }
+
         public static AssemblyDefinition CloneAssemblyDefinition(string assemblyName)
         {
             var sourceAssembly = GetAssemblyDefinition(assemblyName, -1);
@@ -398,7 +404,7 @@ namespace FastScriptReload.Editor
         /// <param name="assemblyName">程序集名称</param>
         /// <param name="isCache"></param>
         /// <returns>编译后的 AssemblyDefinition，如果编译失败返回 null</returns>
-        public static AssemblyDefinition Compile(string assemblyName, bool isCache = true)
+        public static AssemblyDefinition Compile(string assemblyName)
         {
             var compilation = GetCompilation(assemblyName);
             if (compilation == null)
@@ -422,26 +428,16 @@ namespace FastScriptReload.Editor
                 assemblyDef.Name.Name = assemblyDefName;
                 assemblyDef.MainModule.Name = assemblyDefName;
 
-                if (isCache)
-                {
-                    var list = _assemblyDefinitions.GetValueOrDefault(assemblyName, new List<AssemblyDefinition>());
-                    list.Add(assemblyDef);
-                }
-
                 return assemblyDef;
             }
-            else
-            {
-                var errorMsg = string.Join("\n", emitResult.Diagnostics
-                    .Where(d => d.Severity == DiagnosticSeverity.Error)
-                    .Select(d => d.ToString()));
 
-                errorMsg = $"程序集 {assemblyName} 编译失败: {errorMsg}";
-                LoggerScoped.LogError(errorMsg);
-                FastScriptReloadSceneOverlay.NotifyHookFailed(errorMsg);
+            var errorMsg = string.Join("\n", emitResult.Diagnostics
+                .Where(d => d.Severity == DiagnosticSeverity.Error)
+                .Select(d => d.ToString()));
 
-                return null;
-            }
+            errorMsg = $"程序集 {assemblyName} 编译失败: {errorMsg}";
+
+            throw new Exception(errorMsg);
         }
 
         /// <summary>
