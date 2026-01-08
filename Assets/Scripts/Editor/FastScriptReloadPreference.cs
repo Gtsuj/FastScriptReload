@@ -19,27 +19,48 @@ namespace FastScriptReload.Editor
         /// <summary>Used to know when file watchers have changed from project window contextual menu (so when to update file watchers)</summary>
         public static bool FileWatcherSetupEntriesChanged = false;
 
+        // SessionState 键名
+        private const string SessionKey_HotReloadEnabled = "FastScriptReload.IsHotReloadEnabledThisSession";
+
+        /// <summary>
+        /// 检查当前会话的 HotReload 是否启用
+        /// 默认为 false，需要手动开启
+        /// Unity 编辑器重启后自动重置为 false
+        /// </summary>
+        public static bool EnableAutoReloadForChangedFiles
+        {
+            get => SessionState.GetBool(SessionKey_HotReloadEnabled, false);
+            set
+            {
+                bool oldValue = EnableAutoReloadForChangedFiles;
+                if (oldValue != value)
+                {
+                    SessionState.SetBool(SessionKey_HotReloadEnabled, value);
+                    OnHotReloadStateChanged(value);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 当 HotReload 状态变化时的处理逻辑
+        /// </summary>
+        /// <param name="isEnabled">是否启用</param>
+        private static void OnHotReloadStateChanged(bool isEnabled)
+        {
+            // 触发初始化或重置
+            if (isEnabled)
+            {
+                EditorApplication.delayCall += ReloadHelper.Init;
+            }
+            else
+            {
+                ReloadHelper.Dispose();
+                FastScriptReloadSceneOverlay.ResetState();
+            }
+        }
+
         public static readonly IntProjectEditorPreferenceDefinition BatchScriptChangesAndReloadEveryNSeconds = new IntProjectEditorPreferenceDefinition(
             "批处理脚本变更，每 N 秒重载一次", "BatchScriptChangesAndReloadEveryNSeconds", 1);
-
-        public static readonly ToggleProjectEditorPreferenceDefinition EnableAutoReloadForChangedFiles = new ToggleProjectEditorPreferenceDefinition(
-            "启用自动热重载", "EnableAutoReloadForChangedFiles", true,
-            (object newValue, object oldValue) =>
-            {
-                // 当开关变更为true时触发初始化
-                if ((bool)newValue && !(bool)oldValue)
-                {
-                    UnityEditor.EditorApplication.delayCall += () =>
-                    {
-                        ReloadHelper.Init();
-                    };
-                }
-                // 当开关变更为false时重置状态
-                else if (!(bool)newValue && (bool)oldValue)
-                {
-                    FastScriptReloadSceneOverlay.ResetState();
-                }
-            });
     
         public static readonly StringListProjectEditorPreferenceDefinition FilesExcludedFromHotReload = new StringListProjectEditorPreferenceDefinition(
             "排除在热重载之外的文件", "FilesExcludedFromHotReload", new List<string> {}, isReadonly: true);
@@ -85,16 +106,27 @@ namespace FastScriptReload.Editor
         public static readonly ToggleProjectEditorPreferenceDefinition WatchOnlySpecified = new ToggleProjectEditorPreferenceDefinition(
             "手动指定监控的文件/文件夹", "WatchOnlySpecified", false);
 
-        public static List<ProjectEditorPreferenceDefinitionBase> PreferenceDefinitions = new List<ProjectEditorPreferenceDefinitionBase>()
+        public static List<ProjectEditorPreferenceDefinitionBase> PreferenceDefinitions
         {
-            CreateDefaultShowOptionPreferenceDefinition(),
-            BatchScriptChangesAndReloadEveryNSeconds,
-            EnableAutoReloadForChangedFiles,
-            StopShowingAutoReloadEnabledDialogBox,
-            FileWatcherSetupEntries,
-            TriggerDomainReloadIfOverNDynamicallyLoadedAssembles,
-            IsForceLockAssembliesViaCode
-        };
+            get
+            {
+                var list = new List<ProjectEditorPreferenceDefinitionBase>();
+                
+                var defaultOption = CreateDefaultShowOptionPreferenceDefinition();
+                if (defaultOption != null)
+                {
+                    list.Add(defaultOption);
+                }
+                
+                list.Add(BatchScriptChangesAndReloadEveryNSeconds);
+                list.Add(StopShowingAutoReloadEnabledDialogBox);
+                list.Add(FileWatcherSetupEntries);
+                list.Add(TriggerDomainReloadIfOverNDynamicallyLoadedAssembles);
+                list.Add(IsForceLockAssembliesViaCode);
+                
+                return list;
+            }
+        }
 
         private static bool PrefsLoaded = false;
 

@@ -185,6 +185,40 @@ namespace FastScriptReload.Editor
             _root.style.borderTopRightRadius = 4;
             _root.style.minWidth = 200;
 
+            // 顶部按钮栏
+            var buttonBar = new VisualElement();
+            buttonBar.style.flexDirection = FlexDirection.Row;
+            buttonBar.style.marginBottom = 6;
+            buttonBar.style.justifyContent = Justify.SpaceBetween;
+
+            // 开关按钮
+            var toggleButton = new Button(() => 
+            {
+                FastScriptReloadPreference.EnableAutoReloadForChangedFiles = 
+                    !FastScriptReloadPreference.EnableAutoReloadForChangedFiles;
+                UpdateContent();
+            });
+            toggleButton.style.flexGrow = 1;
+            toggleButton.style.marginRight = 4;
+            toggleButton.style.fontSize = 11;
+            toggleButton.name = "toggle-button";
+            UpdateToggleButtonStyle(toggleButton);
+
+            // 设置按钮
+            var settingsButton = new Button(() => 
+            {
+                // 打开 Project Settings 的 Fast Script Reload 页面
+                FastScriptReloadWelcomeScreen.Init();
+            }) 
+            { 
+                text = "⚙" 
+            };
+            settingsButton.style.width = 30;
+            settingsButton.style.fontSize = 14;
+
+            buttonBar.Add(toggleButton);
+            buttonBar.Add(settingsButton);
+
             // 流程状态标签容器（替换原来的_statusLabel）
             var stateContainer = new VisualElement();
             stateContainer.style.flexDirection = FlexDirection.Row;
@@ -216,6 +250,7 @@ namespace FastScriptReload.Editor
             _detailsButton.style.fontSize = 10;
             _detailsButton.style.display = DisplayStyle.None;
 
+            _root.Add(buttonBar);
             _root.Add(stateContainer);
             _root.Add(_hookCountLabel);
             _root.Add(_detailsButton);
@@ -226,11 +261,21 @@ namespace FastScriptReload.Editor
             return _root;
         }
 
+        /// <summary>
+        /// 更新开关按钮样式
+        /// </summary>
+        private void UpdateToggleButtonStyle(Button button)
+        {
+            bool isEnabled = FastScriptReloadPreference.EnableAutoReloadForChangedFiles;
+            button.text = isEnabled ? "● Enabled" : "○ Disabled";
+            button.style.color = isEnabled ? new Color(0.3f, 1f, 0.3f) : new Color(1f, 0.3f, 0.3f);
+        }
+
         public FastScriptReloadSceneOverlay()
         {
             EditorApplication.update += OnEditorUpdate;
-            // 初始化时检查AutoReload是否启用
-            UpdateVisibility();
+            // Overlay 默认显示，不关联 EnableAutoReloadForChangedFiles 状态
+            displayed = true;
         }
 
         ~FastScriptReloadSceneOverlay()
@@ -238,21 +283,8 @@ namespace FastScriptReload.Editor
             EditorApplication.update -= OnEditorUpdate;
         }
 
-        private void UpdateVisibility()
-        {
-            // 根据EnableAutoReloadForChangedFiles配置决定是否显示Overlay
-            bool shouldDisplay = (bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles
-                .GetEditorPersistedValueOrDefault();
-            if (displayed != shouldDisplay)
-            {
-                displayed = shouldDisplay;
-            }
-        }
-
         private void OnEditorUpdate()
         {
-            UpdateVisibility();
-
             if (_initialized && displayed)
             {
                 UpdateContent();
@@ -264,6 +296,13 @@ namespace FastScriptReload.Editor
         {
             if (!_initialized || _root == null)
                 return;
+
+            // 更新开关按钮样式
+            var toggleButton = _root.Q<Button>("toggle-button");
+            if (toggleButton != null)
+            {
+                UpdateToggleButtonStyle(toggleButton);
+            }
 
             HotReloadStateInfo stateInfo;
             lock (STATE_LOCK)

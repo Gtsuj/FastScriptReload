@@ -78,7 +78,7 @@ namespace FastScriptReload.Editor
         [InitializeOnLoadMethod]
         public static async void Init()
         {
-            if (!(bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles.GetEditorPersistedValueOrDefault())
+            if (!FastScriptReloadPreference.EnableAutoReloadForChangedFiles)
             {
                 return;
             }
@@ -107,6 +107,11 @@ namespace FastScriptReload.Editor
             RebuildHooks();
             
             FastScriptReloadSceneOverlay.NotifyInitializationComplete();
+        }
+
+        public static void Dispose()
+        {
+            CompilationPipeline.RequestScriptCompilation();
         }
     }
 }

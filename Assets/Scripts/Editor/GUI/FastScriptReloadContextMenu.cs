@@ -101,7 +101,7 @@ namespace FastScriptReload.Editor
                 if ((bool)FastScriptReloadPreference.WatchOnlySpecified.GetEditorPersistedValueOrDefault())
                 {
                     var isAnyFileWatcherSet = FastScriptReloadPreference.FileWatcherSetupEntries.GetElements().Any();
-                    FastScriptReloadPreference.EnableAutoReloadForChangedFiles.SetEditorPersistedValue(isAnyFileWatcherSet);
+                    FastScriptReloadPreference.EnableAutoReloadForChangedFiles = isAnyFileWatcherSet;
                 }
             }
         }
@@ -126,7 +126,7 @@ namespace FastScriptReload.Editor
             }
             Debug.LogWarning("File Watcher Setup has been cleared - make sure to add some.");
 
-            FastScriptReloadPreference.EnableAutoReloadForChangedFiles.SetEditorPersistedValue(false);
+            FastScriptReloadPreference.EnableAutoReloadForChangedFiles = false;
 
             FastScriptReloadManager.ClearFileWatchers();
         }
