@@ -1,0 +1,7 @@
+.idea/
+CompileServer.Main/obj
+CompileServer.Main/bin
+HookInfo/obj
+HookInfo/bin
+HookInfo.Runtime/obj
+HookInfo.Runtime/bin

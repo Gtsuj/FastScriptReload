@@ -108,7 +108,7 @@ namespace FastScriptReload.Editor
             if (!_isEditorModeHotReloadEnabled && _lastPlayModeStateChange != PlayModeStateChange.EnteredPlayMode)
             {
 #if ImmersiveVrTools_DebugEnabled
-            // LoggerScoped.Log($"Application not playing, change to: {e.Name} won't be compiled and hot reloaded");
+                // LoggerScoped.Log($"Application not playing, change to: {e.Name} won't be compiled and hot reloaded");
 #endif
                 return true;
             }
@@ -146,70 +146,70 @@ namespace FastScriptReload.Editor
 
                     break;
 #if UNITY_2021_1_OR_NEWER && UNITY_EDITOR_WIN
-                case FileWatcherImplementation.DirectWindowsApi: 
-                // On Windows, this is a WindowsFileSystemWatcher.
-                // On other platforms, it's the default Mono implementation.
-                // The WindowsFileSystemWatcher has much lower latency on Windows.
-                // However, there's a small issue:
-                // The WindowsFileSystemWatcher can, theoretically, miss events.
-                // This is true in Microsoft's implementation as well as ours.
-                // (Actually, ours should be slightly better.)
-                // This can happen if a change occurs during the brief moment
-                // during which the previous batch of changes are being
-                // recorded and queued.
-                // It can also happen if too many changes occur at once, overwhelming
-                // the buffer.
-                // People seem to routinely use the basic MS filewatcher and ignore
-                // these issues, treating them as acceptably unlikely.
-                // Our current implementation here does that too, but we may want
-                // to look at eliminating this issue.
-                // Unfortunately, it's a limitation of the Windows API, and to
-                // my knowledge can't be avoided directly.
-                // The solution is to combine the file watcher with a polling
-                // mechanism which can (slowly, but reliably) catch any missed events.
-                var windowsFileSystemWatcher = new WindowsFileSystemWatcher()
-                {
-                    Path = directoryInfo.FullName,
-                    IncludeSubdirectories = includeSubdirectories,
-                    Filter = filter,
-                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName
-                };
-                windowsFileSystemWatcher.Changed += OnWatchedFileChange;
+                case FileWatcherImplementation.DirectWindowsApi:
+                    // On Windows, this is a WindowsFileSystemWatcher.
+                    // On other platforms, it's the default Mono implementation.
+                    // The WindowsFileSystemWatcher has much lower latency on Windows.
+                    // However, there's a small issue:
+                    // The WindowsFileSystemWatcher can, theoretically, miss events.
+                    // This is true in Microsoft's implementation as well as ours.
+                    // (Actually, ours should be slightly better.)
+                    // This can happen if a change occurs during the brief moment
+                    // during which the previous batch of changes are being
+                    // recorded and queued.
+                    // It can also happen if too many changes occur at once, overwhelming
+                    // the buffer.
+                    // People seem to routinely use the basic MS filewatcher and ignore
+                    // these issues, treating them as acceptably unlikely.
+                    // Our current implementation here does that too, but we may want
+                    // to look at eliminating this issue.
+                    // Unfortunately, it's a limitation of the Windows API, and to
+                    // my knowledge can't be avoided directly.
+                    // The solution is to combine the file watcher with a polling
+                    // mechanism which can (slowly, but reliably) catch any missed events.
+                    var windowsFileSystemWatcher = new WindowsFileSystemWatcher()
+                    {
+                        Path = directoryInfo.FullName,
+                        IncludeSubdirectories = includeSubdirectories,
+                        Filter = filter,
+                        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName
+                    };
+                    windowsFileSystemWatcher.Changed += OnWatchedFileChange;
 
-                // Visual Studio is annoying.
-                // It doesn't actually trigger a nice Changed event.
-                // Instead, it goes through some elaborate procedure.
-                // When changing player.cs, it does:
-                // CREATE: Code\ua4tt1aw.4ae~
-                // CHANGE: Code\ua4tt1aw.4ae~
-                // CREATE: Code\Player.cs~RF70560f7.TMP
-                // REMOVE: Code\Player.cs~RF70560f7.TMP
-                // RENAME: Code\Player.cs -> Code\Player.cs~RF70560f7.TMP
-                // RENAME: Code\ua4tt1aw.4ae~ -> Code\Player.cs
-                // REMOVE: Code\Player.cs~RF70560f7.TMP - again, somehow?
-                //
-                // This was fine before, because the watcher implementation was polling.
-                // I guess this usually happens fast between polls, so it just looks like a change.
-                // Note that that may mean there's a potential bug if polling happens in the middle of this procedure.
-                //
-                // This fix is a temporary measure.
-                // We should probably think more seriously about maybe being able to catch file additions and renames.
-                // If we dealt with those extra events smoothly, this would probably just work.
-                //
-                // Other IDEs may do similar but different things. We want a general purpose solution, not a VS specific one.
-                // Perhaps the approach should be to keep track of touched files, then do some diff procedure to work out what's happened to them?
-                // This could, perhaps, be integrated into the file watcher robustness polling solution discussed above.
-                // The two systems share a need for some type of event debouncing.
-                windowsFileSystemWatcher.Renamed += (source, e) =>
-                {
-                    if (e.Name.EndsWith(".cs"))
-                        OnWatchedFileChange(source, e);
-                };
-        
-                windowsFileSystemWatcher.EnableRaisingEvents = true;
-                                    
-                _fileWatchers.Add(windowsFileSystemWatcher);
-                break;
+                    // Visual Studio is annoying.
+                    // It doesn't actually trigger a nice Changed event.
+                    // Instead, it goes through some elaborate procedure.
+                    // When changing player.cs, it does:
+                    // CREATE: Code\ua4tt1aw.4ae~
+                    // CHANGE: Code\ua4tt1aw.4ae~
+                    // CREATE: Code\Player.cs~RF70560f7.TMP
+                    // REMOVE: Code\Player.cs~RF70560f7.TMP
+                    // RENAME: Code\Player.cs -> Code\Player.cs~RF70560f7.TMP
+                    // RENAME: Code\ua4tt1aw.4ae~ -> Code\Player.cs
+                    // REMOVE: Code\Player.cs~RF70560f7.TMP - again, somehow?
+                    //
+                    // This was fine before, because the watcher implementation was polling.
+                    // I guess this usually happens fast between polls, so it just looks like a change.
+                    // Note that that may mean there's a potential bug if polling happens in the middle of this procedure.
+                    //
+                    // This fix is a temporary measure.
+                    // We should probably think more seriously about maybe being able to catch file additions and renames.
+                    // If we dealt with those extra events smoothly, this would probably just work.
+                    //
+                    // Other IDEs may do similar but different things. We want a general purpose solution, not a VS specific one.
+                    // Perhaps the approach should be to keep track of touched files, then do some diff procedure to work out what's happened to them?
+                    // This could, perhaps, be integrated into the file watcher robustness polling solution discussed above.
+                    // The two systems share a need for some type of event debouncing.
+                    windowsFileSystemWatcher.Renamed += (source, e) =>
+                    {
+                        if (e.Name.EndsWith(".cs"))
+                            OnWatchedFileChange(source, e);
+                    };
+
+                    windowsFileSystemWatcher.EnableRaisingEvents = true;
+
+                    _fileWatchers.Add(windowsFileSystemWatcher);
+                    break;
 #endif
 
                 case FileWatcherImplementation.CustomPolling:
@@ -309,20 +309,11 @@ namespace FastScriptReload.Editor
                     c.IsBeingProcessed = true;
                 }
 
-                Task.Run(() =>
+                Task.Run(async () =>
                 {
                     FastScriptReloadSceneOverlay.NotifyHookStart();
 
-                    // 按程序集分组
-                    var filesByAssembly = changesAwaitingHotReload
-                        .GroupBy(e => TypeInfoHelper.GetAssemblyName(e.FullFileName))
-                        .ToDictionary(g => g.Key, g => g.GroupBy(e => e.FullFileName)
-                            .Select(e => e.First().FullFileName).ToList());
-
-                    foreach (var pair in filesByAssembly)
-                    {
-                        ReloadChangedFiles(changesAwaitingHotReload, pair.Key, pair.Value);
-                    }
+                    await ReloadChangedFilesAsync(changesAwaitingHotReload);
 
                     FastScriptReloadSceneOverlay.NotifyHookComplete();
                 });
@@ -331,37 +322,71 @@ namespace FastScriptReload.Editor
             _lastTimeChangeBatchRun = DateTime.UtcNow;
         }
 
-        private void ReloadChangedFiles(List<DynamicFileHotReloadState> changesAwaitingHotReload, string assemblyName, List<string> files)
+        private async Task ReloadChangedFilesAsync(List<DynamicFileHotReloadState> changesAwaitingHotReload)
         {
+            var files = changesAwaitingHotReload
+                .GroupBy(e => e.FullFileName)
+                .Select(g => g.First().FullFileName)
+                .ToList();
+
             try
             {
                 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
-                var diffResults = ReloadHelper.CompileAndDiff(assemblyName, files);
-                if (diffResults == null)
+                // 获取全局的 HTTP 编译客户端实例
+                var httpCompileClient = ReloadHelper.GetHttpCompileClient();
+                if (httpCompileClient == null)
                 {
-                    changesAwaitingHotReload.ForEach(c => c.ErrorOn = DateTime.UtcNow);
-                    
-                    // 通知SceneOverlay显示无变化状态
-                    FastScriptReloadSceneOverlay.NotifyNoChange();
-                    
+                    var errorMsg = "CompileServer 未初始化，请确保已启用热重载功能";
+                    LoggerScoped.LogError(errorMsg);
+                    FastScriptReloadSceneOverlay.NotifyHookFailed(errorMsg);
+
+                    changesAwaitingHotReload.ForEach(c =>
+                    {
+                        c.ErrorOn = DateTime.UtcNow;
+                        c.ErrorText = errorMsg;
+                    });
+
+                    SafeInvoke(HotReloadFailed, changesAwaitingHotReload);
                     return;
                 }
 
-                LoggerScoped.LogDebug($"CompileAndDiff耗时: {stopwatch.ElapsedMilliseconds}ms");
+                // 通过HTTP调用CompileServer进行编译和IL修改
+                var compileResponse = await httpCompileClient.CompileAsync(files);
 
-                // 删除冗余部分，将改动的方法转换为静态方法
-                var assemblyPath = ReloadHelper.ModifyCompileAssembly(assemblyName, diffResults);
+                if (compileResponse == null || !compileResponse.Success)
+                {
+                    var errorMsg = compileResponse?.ErrorMessage ?? "编译请求失败";
+                    FastScriptReloadSceneOverlay.NotifyHookFailed(errorMsg);
 
+                    changesAwaitingHotReload.ForEach(c =>
+                    {
+                        c.ErrorOn = DateTime.UtcNow;
+                        c.ErrorText = errorMsg;
+                    });
+
+                    SafeInvoke(HotReloadFailed, changesAwaitingHotReload);
+                    return;
+                }
+
+                // 如果没有变化，通知无变化状态
+                if (compileResponse.HookTypeInfos == null || compileResponse.HookTypeInfos.Count == 0)
+                {
+                    changesAwaitingHotReload.ForEach(c => c.ErrorOn = DateTime.UtcNow);
+                    FastScriptReloadSceneOverlay.NotifyNoChange();
+                    return;
+                }
+
+                LoggerScoped.LogDebug($"HTTP编译耗时: {stopwatch.ElapsedMilliseconds}ms, 类型数: {compileResponse.HookTypeInfos.Count}");
+
+                // 更新文件编译状态
                 changesAwaitingHotReload.ForEach(c =>
                 {
                     c.FileCompiledOn = DateTime.UtcNow;
-                    c.AssemblyNameCompiledIn = assemblyPath;
                 });
-                LoggerScoped.LogDebug($"ModifyCompileAssembly耗时: {stopwatch.ElapsedMilliseconds}ms");
 
-                // 应用热重载Hook
-                ReloadHelper.ApplyHooks(diffResults);
+                // 应用热重载Hook（使用HTTP响应中的HookTypeInfos）
+                ReloadHelper.ApplyHooks(compileResponse.HookTypeInfos);
                 LoggerScoped.LogDebug($"ApplyHooks耗时: {stopwatch.ElapsedMilliseconds}ms");
 
                 changesAwaitingHotReload.ForEach(c =>
@@ -390,16 +415,62 @@ namespace FastScriptReload.Editor
             }
         }
 
+        /// <summary>
+        /// 根据文件路径获取所属的程序集名称
+        /// </summary>
+        private string GetAssemblyNameForFile(string filePath)
+        {
+            // 将绝对路径转换为相对于项目根目录的路径
+            var projectRoot = Path.GetDirectoryName(Application.dataPath);
+            string relativePath;
+
+            if (Path.IsPathRooted(filePath))
+            {
+                // 如果是绝对路径，转换为相对路径
+                if (filePath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    relativePath = filePath.Substring(projectRoot.Length + 1).Replace('\\', '/');
+                }
+                else
+                {
+                    // 如果不在项目目录下，直接使用文件名
+                    relativePath = Path.GetFileName(filePath);
+                }
+            }
+            else
+            {
+                relativePath = filePath.Replace('\\', '/');
+            }
+
+            // 确保路径以 Assets/ 开头
+            if (!relativePath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+            {
+                relativePath = "Assets/" + relativePath;
+            }
+
+            // 查找包含此文件的程序集
+            var assemblies = CompilationPipeline.GetAssemblies();
+            foreach (var assembly in assemblies)
+            {
+                if (assembly.sourceFiles.Any(sourceFile =>
+                    sourceFile.Equals(relativePath, StringComparison.OrdinalIgnoreCase) ||
+                    sourceFile.Replace('\\', '/').Equals(relativePath, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return assembly.name;
+                }
+            }
+
+            LoggerScoped.LogWarning($"无法找到文件 '{filePath}' 所属的程序集");
+            return null;
+        }
+
+
         private void SafeInvoke(Action<List<DynamicFileHotReloadState>> ev, List<DynamicFileHotReloadState> changesAwaitingHotReload)
         {
-            try
+            EditorApplication.delayCall += () =>
             {
                 ev?.Invoke(changesAwaitingHotReload);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"Error when executing event, {e}");
-            }
+            };
         }
 
         private void AddToLastProcessedDynamicFileHotReloadStates(DynamicFileHotReloadState c)
@@ -456,11 +527,11 @@ namespace FastScriptReload.Editor
         {
             LoggerScoped.LogWarning(@"Fast Script Reload - Unity File Path Bug - Warning!
 Path for changed file passed by Unity does not exist. This is a known editor bug, more info: https://issuetracker.unity3d.com/issues/filesystemwatcher-returns-bad-file-path
-                    
+
 Best course of action is to update editor as issue is already fixed in newer (minor and major) versions.
-                    
+
 As a workaround asset will try to resolve paths via directory search.
-                    
+
 Workaround will search in all folders (under project root) and will use first found file. This means it's possible it'll pick up wrong file as there's no directory information available.");
 
             var changedFileName = new FileInfo(filePathToUse).Name;

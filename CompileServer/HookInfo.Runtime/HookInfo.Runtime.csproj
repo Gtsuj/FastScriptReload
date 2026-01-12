@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>netstandard2.1</TargetFramework>
+        <LangVersion>10</LangVersion>
+    </PropertyGroup>
+
+    <!-- 构建后自动复制到 Unity 项目 -->
+    <Target Name="CopyToUnity" AfterTargets="Build">
+        <PropertyGroup>
+            <UnityPluginPath>$(ProjectDir)..\..\Assets\Plugins\CompileServer\</UnityPluginPath>
+        </PropertyGroup>
+        <MakeDir Directories="$(UnityPluginPath)" />
+        <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(UnityPluginPath)" />
+        <Message Text="✅ Copied HookInfo.Runtime.dll to Unity: $(UnityPluginPath)" Importance="high" />
+    </Target>
+
+</Project>

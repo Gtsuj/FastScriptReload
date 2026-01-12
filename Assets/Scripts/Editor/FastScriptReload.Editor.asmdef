@@ -20,7 +20,8 @@
         "Mono.Cecil.dll",
         "Mono.Cecil.Pdb.dll",
         "Mono.Cecil.Rocks.dll",
-        "Newtonsoft.Json.dll"
+        "Newtonsoft.Json.dll",
+        "HookInfo.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [],

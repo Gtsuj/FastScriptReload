@@ -1,0 +1,53 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <!-- 与 Unity 项目保持一致，不启用可空引用类型 -->
+        <!-- <Nullable>enable</Nullable> -->
+    </PropertyGroup>
+
+    <ItemGroup>
+      <!-- Roslyn 编译器 -->
+      <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+      
+      <!-- IL 修改 -->
+      <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+      
+      <!-- JSON 序列化 -->
+      <PackageReference Include="Microsoft.AspNetCore.Mvc.NewtonsoftJson" Version="8.0.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <!-- 引用 HookInfo 共享程序集 -->
+      <ProjectReference Include="..\HookInfo\HookInfo.csproj" />
+      <!-- 引用 HookInfo.Runtime -->
+      <ProjectReference Include="..\HookInfo.Runtime\HookInfo.Runtime.csproj" />
+    </ItemGroup>
+
+    <!-- 构建后自动复制到 Unity 项目 -->
+    <Target Name="CopyToUnity" AfterTargets="Build">
+        <PropertyGroup>
+            <UnityPluginPath>$(ProjectDir)..\..\Assets\Plugins\CompileServer~\</UnityPluginPath>
+        </PropertyGroup>
+        <MakeDir Directories="$(UnityPluginPath)" />
+        <!-- 复制主程序exe文件 -->
+        <Copy SourceFiles="$(TargetDir)$(TargetName).exe" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).exe')" />
+        <!-- 复制主程序dll文件（如果存在） -->
+        <Copy SourceFiles="$(TargetDir)$(TargetName).dll" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).dll')" />
+        <!-- 复制PDB文件（用于调试） -->
+        <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+        <!-- 复制运行时配置文件 -->
+        <Copy SourceFiles="$(TargetDir)$(TargetName).runtimeconfig.json" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).runtimeconfig.json')" />
+        <Copy SourceFiles="$(TargetDir)$(TargetName).deps.json" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).deps.json')" />
+        <!-- 复制所有依赖的DLL文件 -->
+        <ItemGroup>
+            <RuntimeFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)$(TargetName).dll" />
+        </ItemGroup>
+        <Copy SourceFiles="@(RuntimeFiles)" DestinationFolder="$(UnityPluginPath)" />
+        <Message Text="✅ Copied CompileServer to Unity: $(UnityPluginPath)" Importance="high" />
+    </Target>
+
+</Project>
+

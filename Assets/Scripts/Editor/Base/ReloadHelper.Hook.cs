@@ -1,9 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Reflection;
-using FastScriptReload.Runtime;
 using HarmonyLib;
+using HookInfo.Models;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 using Newtonsoft.Json;
 
@@ -15,105 +14,35 @@ namespace FastScriptReload.Editor
     public static partial class ReloadHelper
     {
         /// <summary>
-        /// 初始化时根据HookTypeInfoCache重建Hook
-        /// </summary>
-        public static void RebuildHooks()
-        {
-            if (!File.Exists(HOOK_TYPE_INFO_CACHE_PATH))
-            {
-                return;
-            }
-
-            var cache = File.ReadAllText(HOOK_TYPE_INFO_CACHE_PATH);
-            HookTypeInfoCache = JsonConvert.DeserializeObject<Dictionary<string, HookTypeInfo>>(cache);
-
-            foreach (var (typeFullName, hookTypeInfo) in HookTypeInfoCache)
-            {
-                var originType = ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.GetValueOrDefault(typeFullName);
-
-                foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
-                {
-                    if (modifiedMethod.HasGenericParameters)
-                    {
-                        continue;
-                    }
-
-                    if (string.IsNullOrEmpty(modifiedMethod.AssemblyPath) || !File.Exists(modifiedMethod.AssemblyPath))
-                    {
-                        continue;
-                    }
-
-                    var wrapperAssembly = Assembly.LoadFrom(modifiedMethod.AssemblyPath);
-                    Type wrapperType = wrapperAssembly.GetType(typeFullName);
-                    if (wrapperType == null)
-                    {
-                        LoggerScoped.LogWarning($"在 Wrapper 程序集中找不到类型: {typeFullName}");
-                        return;
-                    }
-
-                    // 获取 Wrapper 类型中的所有静态方法（公有和私有）
-                    var wrapperMethod = wrapperType.GetMethodByMethodDefName(modifiedMethod.WrapperMethodName);
-                    
-                    MethodHelper.DisableVisibilityChecks(wrapperMethod);
-
-                    if (modifiedMethod.MemberModifyState == MemberModifyState.Added)
-                    {
-                        AddedMethodHookHandle(methodName, modifiedMethod, wrapperMethod);
-                    }
-                    else
-                    {
-                        var originMethod = originType.GetMethodByMethodDefName(modifiedMethod.MemberFullName);
-                        if (originMethod == null)
-                        {
-                            return;
-                        }
-
-                        Hook(methodName, originMethod, wrapperMethod);
-                    }
-                }
-            }
-        }
-
-        /// <summary>
         /// 应用热重载Hook，将Wrapper程序集中的静态方法Hook到原有方法上
         /// Hook成功后保存到全局容器中
         /// </summary>
-        /// <param name="diffResults">差异结果</param>
-        public static void ApplyHooks(Dictionary<string, DiffResult> diffResults)
+        /// <param name="hookTypeInfos">编译结果</param>
+        public static void ApplyHooks(Dictionary<string, HookTypeInfo> hookTypeInfos)
         {
-            foreach (var (typeFullName, result) in diffResults)
+            foreach (var (typeFullName, hookTypeInfo) in hookTypeInfos)
             {
-                if (!HookTypeInfoCache.TryGetValue(typeFullName, out var hookTypeInfo))
-                {
-                    continue;
-                }
+                HookField(hookTypeInfo);
 
-                HookField(hookTypeInfo, result);
-                
-                HookMethod(hookTypeInfo, result);
+                HookMethod(hookTypeInfo);
             }
         }
 
-        private static void HookField(HookTypeInfo hookTypeInfo, DiffResult result)
+        private static void HookField(HookTypeInfo hookTypeInfo)
         {
-            foreach (var (name, fieldDiffInfo) in result.AddedFields)
+            foreach (var (name, fieldInfo) in hookTypeInfo.AddedFields)
             {
                 FastScriptReloadHookDetailsWindow.NotifyMemberHooked(name, true);
             }
         }
 
-        private static void HookMethod(HookTypeInfo hookTypeInfo, DiffResult result)
+        private static void HookMethod(HookTypeInfo hookTypeInfo)
         {
             var typeFullName = hookTypeInfo.TypeFullName;
-            var originType = ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.GetValueOrDefault(typeFullName);
+            var originType = Type.GetType($"{typeFullName},{hookTypeInfo.OriginalAssemblyName}");
 
             foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
             {
-                if (!result.ModifiedMethods.ContainsKey(methodName))
-                {
-                    continue;
-                }
-
                 if (modifiedMethod.HasGenericParameters)
                 {
                     FastScriptReloadHookDetailsWindow.NotifyMemberHooked(methodName, true);
@@ -165,8 +94,6 @@ namespace FastScriptReload.Editor
             {
                 FastScriptReloadHookDetailsWindow.NotifyMemberHooked(methodName, true);
             }
-            
-            modifiedMethod.AddHistoricalHookedMethod(wrapperMethod);
         }
 
         private static void Hook(string methodFullName, MethodBase original, MethodBase replacement)

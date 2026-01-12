@@ -50,62 +50,6 @@ namespace FastScriptReload.Editor
         }
 #endif
 
-        /// <summary>
-        /// 根据MethodDefinition的全称获取方法
-        /// </summary>
-        /// <returns>方法</returns>
-        public static MethodBase GetMethodByMethodDefName(this Type type, string methodName)
-        {
-            var splits = methodName.Split(" ");
-            var returnTypeName = splits[0];
-            var methodNameWithoutReturn = splits[1].Replace("::", ".").Replace('<','[').Replace('>',']');
-
-            var methods = type.GetMethods(AccessTools.allDeclared);
-            foreach (var methodInfo in methods)
-            {
-                var name = methodInfo.ResolveFullName().Replace('+', '/');
-                if (name.Contains(methodNameWithoutReturn))
-                {
-                    return methodInfo;
-                }
-            }
-
-            var constructors = type.GetConstructors(AccessTools.allDeclared);
-            foreach (var constructorInfo in constructors)
-            {
-                var name = constructorInfo.ResolveFullName().Replace('+', '/');
-                if (name.Contains(methodNameWithoutReturn))
-                {
-                    return constructorInfo;
-                }
-            }
-
-            return null;
-        }
-
-        public static MethodReference GetMethodReference(this Type type, ModuleDefinition moduleDef, string methodName)
-        {
-            foreach (var method in type.GetMethods(AccessTools.allDeclared))
-            {
-                var methodRef = moduleDef.ImportReference(method);
-                if (methodRef.FullName.Equals(methodName))
-                {
-                    return methodRef;
-                }
-            }
-            
-            foreach (var method in type.GetConstructors(AccessTools.allDeclared))
-            {
-                var methodRef = moduleDef.ImportReference(method);
-                if (methodRef.FullName.Equals(methodName))
-                {
-                    return methodRef;
-                }
-            }
-
-            return null;
-        }
-
         //see _MonoMethod struct in class-internals.h
         [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Auto, Size = 8 + sizeof(long) * 3 + 4)]
         internal unsafe struct MonoMethod64

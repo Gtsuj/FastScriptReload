@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>netstandard2.1</TargetFramework>
+        <RootNamespace>HookInfo</RootNamespace>
+        <LangVersion>latest</LangVersion>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+      <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    </ItemGroup>
+
+    <!-- 构建后自动复制到 Unity 项目 -->
+    <Target Name="CopyToUnity" AfterTargets="Build">
+        <PropertyGroup>
+            <UnityPluginPath>$(ProjectDir)..\..\Assets\Plugins\CompileServer\</UnityPluginPath>
+        </PropertyGroup>
+        <MakeDir Directories="$(UnityPluginPath)" />
+        <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(UnityPluginPath)" />
+        <Message Text="✅ Copied HookInfo.dll to Unity: $(UnityPluginPath)" Importance="high" />
+    </Target>
+
+</Project>
+
