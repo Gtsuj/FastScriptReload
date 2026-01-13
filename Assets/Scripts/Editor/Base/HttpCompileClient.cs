@@ -274,26 +274,15 @@ namespace FastScriptReload.Editor
             }
 
             // 查找 CompileServer.exe（Package路径）
-            var possiblePaths = new[]
+            var path = Path.GetDirectoryName(typeof(HookMethodInfo).Assembly.Location);
+            string exePath = Path.Combine(path, "..", "CompileServer~", "CompileServer.exe");
+            if (File.Exists(exePath))
             {
-                Path.Combine(Application.dataPath, "Plugins", "CompileServer~", "CompileServer.exe")
-            };
-
-            string exePath = null;
-            foreach (var path in possiblePaths)
-            {
-                var fullPath = Path.GetFullPath(path);
-                if (File.Exists(fullPath))
-                {
-                    exePath = fullPath;
-                    LoggerScoped.LogDebug($"📂 找到编译服务: {exePath}");
-                    break;
-                }
+                LoggerScoped.LogDebug($"📂 找到编译服务: {exePath}");
             }
-
-            if (exePath == null)
+            else
             {
-                LoggerScoped.LogError($"❌ 编译服务可执行文件不存在，已尝试路径:\n{string.Join("\n", possiblePaths.Select(p => $"  - {Path.GetFullPath(p)}"))}");
+                LoggerScoped.LogError($"❌ 编译服务可执行文件不存在:{exePath}");
                 return;
             }
 
@@ -316,9 +305,6 @@ namespace FastScriptReload.Editor
 
                 _localProcess.Exited += (sender, e) =>
                 {
-                    var exitCode = _localProcess?.ExitCode ?? -1;
-                    LoggerScoped.LogWarning($"⚠️ 编译服务进程已退出: ExitCode={exitCode}");
-
                     // 清理进程引用
                     if (_localProcess != null)
                     {

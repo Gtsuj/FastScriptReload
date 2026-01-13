@@ -204,18 +204,12 @@
           "Newtonsoft.Json": "13.0.3"
         },
         "runtime": {
-          "HookInfo.dll": {
-            "assemblyVersion": "1.0.0",
-            "fileVersion": "1.0.0.0"
-          }
+          "HookInfo.dll": {}
         }
       },
       "HookInfo.Runtime/1.0.0": {
         "runtime": {
-          "HookInfo.Runtime.dll": {
-            "assemblyVersion": "1.0.0",
-            "fileVersion": "1.0.0.0"
-          }
+          "HookInfo.Runtime.dll": {}
         }
       }
     }

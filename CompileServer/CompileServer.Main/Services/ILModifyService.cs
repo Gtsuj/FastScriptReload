@@ -5,6 +5,7 @@ using HookInfo.Models;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Mono.Cecil.Rocks;
+using Mono.Collections.Generic;
 using Code = Mono.Cecil.Cil.Code;
 using MethodAttributes = Mono.Cecil.MethodAttributes;
 using MethodImplAttributes = Mono.Cecil.MethodImplAttributes;
@@ -137,9 +138,6 @@ namespace CompileServer.Services
 
                     var hookMethodName = methodDef.FullName;
 
-                    methodDef.Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig;
-                    methodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
-
                     // 将@this参数加入到方法参数列表的头部
                     if (!methodDef.IsStatic)
                     {
@@ -147,6 +145,9 @@ namespace CompileServer.Services
                         methodDef.HasThis = false;
                         methodDef.ExplicitThis = false;
                     }
+
+                    methodDef.Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig;
+                    methodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
 
                     if (setBaseType)
                     {
@@ -440,15 +441,18 @@ namespace CompileServer.Services
             if (ReloadHelper.HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookTypeInfo))
             {
                 var methodName = methodRef.IsGenericInstance ? methodRef.GetElementMethod().FullName : methodRef.FullName;
-                if (hookTypeInfo.ModifiedMethods.TryGetValue(methodName, out var methodInfo) && methodInfo.MemberModifyState == MemberModifyState.Added)
-                {
-                    return module.ImportReference(methodInfo.WrapperMethodDef);
-                }
 
-                if (hookTypeInfo.TryGetMethod(methodName, out methodInfo)
-                    && (methodInfo.MemberModifyState == MemberModifyState.Added || methodRef is GenericInstanceMethod))
+                if (hookTypeInfo.TryGetMethod(methodName, out var methodInfo))
                 {
-                    return methodRef;
+                    if (methodInfo.MemberModifyState == MemberModifyState.Added)
+                    {
+                        return module.ImportReference(methodInfo.WrapperMethodDef);
+                    }
+
+                    if(methodRef is GenericInstanceMethod genericInstance)
+                    {
+                        return CreateGenericInstanceMethod(methodInfo.WrapperMethodDef, genericInstance.GenericArguments, module);
+                    }
                 }
             }
 
@@ -479,19 +483,24 @@ namespace CompileServer.Services
             // 处理泛型方法实例
             if (methodRef is GenericInstanceMethod genericInstanceMethod)
             {
-                var elementMethod = genericInstanceMethod.GetElementMethod();
+                var elementMethod = CopyMethodReference(genericInstanceMethod.GetElementMethod());
 
-                var newGenericInstanceMethod = new GenericInstanceMethod(CopyMethodReference(elementMethod));
-                // 添加泛型参数
-                foreach (var typeRef in genericInstanceMethod.GenericArguments)
-                {
-                    newGenericInstanceMethod.GenericArguments.Add(GetOriginalType(typeRef, module));
-                }
-
-                return module.ImportReference(newGenericInstanceMethod);
+                return CreateGenericInstanceMethod(elementMethod, genericInstanceMethod.GenericArguments, module);
             }
 
             return CopyMethodReference(methodRef);
+        }
+
+        private MethodReference CreateGenericInstanceMethod(MethodReference elementMethod, Collection<TypeReference> genericArguments, ModuleDefinition module)
+        {
+            var newGenericInstanceMethod = new GenericInstanceMethod(elementMethod);
+            // 添加泛型参数
+            foreach (var typeRef in genericArguments)
+            {
+                newGenericInstanceMethod.GenericArguments.Add(GetOriginalType(typeRef, module));
+            }
+
+            return module.ImportReference(newGenericInstanceMethod);
         }
 
         /// <summary>

@@ -39,6 +39,11 @@ namespace HookInfo.Models
         public bool TryGetMethod(string wrapperFullName, out HookMethodInfo methodInfo)
         {
             methodInfo = null;
+            if (ModifiedMethods.TryGetValue(wrapperFullName, out methodInfo))
+            {
+                return true;
+            }
+
             foreach (var (_, modifiedMethod) in ModifiedMethods)
             {
                 if (modifiedMethod.WrapperMethodName.Equals(wrapperFullName))

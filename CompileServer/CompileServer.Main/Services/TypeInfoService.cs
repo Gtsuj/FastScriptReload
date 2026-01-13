@@ -140,25 +140,16 @@ namespace CompileServer.Services
                         continue;
                     }
 
-                    var readerParams = new ReaderParameters
-                    {
-                        ReadWrite = true,
-                        InMemory = true,
-                        ReadSymbols = true,
-                        SymbolReaderProvider = new PortablePdbReaderProvider(),
-                        AssemblyResolver = _assemblyResolver
-                    };
-
-                    var assemblyDef = AssemblyDefinition.ReadAssembly(baseDllPath, readerParams);
-
-                    var contextCopy = context;
-                    var assemblyDefCopy = assemblyDef;
                     tasks.Add(Task.Run(async () =>
                     {
+                        var assemblyDef = AssemblyDefinition.ReadAssembly(baseDllPath);
+                        
                         await Task.WhenAll(
-                            BuildAssemblyCompilation(contextCopy),
-                            BuildMethodCallGraph(assemblyDefCopy)
+                            BuildAssemblyCompilation(context),
+                            BuildMethodCallGraph(assemblyDef)
                         );
+
+                        assemblyDef?.Dispose();
                     }));
                 }
                 catch (Exception ex)
