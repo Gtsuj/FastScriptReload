@@ -56,7 +56,7 @@ namespace CompileServer.Services
         /// <returns>类型差异结果字典，Key为类型全名，Value为差异结果</returns>
         private Dictionary<string, DiffResult> DiffAssembly(string assemblyName, List<string> files, AssemblyDefinition newAssemblyDef)
         {
-            var oldAssemblyDef = _typeInfoService.GetAssemblyDefinition(assemblyName, -1);
+            var oldAssemblyDef = _typeInfoService.GetAssemblyDefinition(assemblyName);
             if (newAssemblyDef == null || oldAssemblyDef == null)
             {
                 _logger.LogError($"无法获取程序集 {assemblyName}");

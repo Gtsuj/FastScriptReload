@@ -35,9 +35,9 @@ namespace CompileServer.Services
         private readonly ConcurrentDictionary<string, CSharpCompilation> _assemblyCompilations = new();
 
         /// <summary>
-        /// Assembly 名称 -> AssemblyDefinition 列表的缓存（用于 Mono.Cecil 分析）
+        /// Assembly 名称 -> AssemblyDefinition 的缓存（用于 Mono.Cecil 分析）
         /// </summary>
-        private readonly Dictionary<string, List<AssemblyDefinition>> _assemblyDefinitions = new();
+        private readonly Dictionary<string, AssemblyDefinition> _assemblyDefinitions = new();
 
         /// <summary>
         /// 方法调用图索引：方法签名 -> 调用者方法信息集合
@@ -168,14 +168,6 @@ namespace CompileServer.Services
                                    $"程序集数: {_assemblyCompilations.Count}, " +
                                    $"方法调用关系数: {_methodCallGraph.Count}, " +
                                    $"类型缓存数: {_allTypesInNonDynamicGeneratedAssemblies.Count}");
-        }
-
-        /// <summary>
-        /// 获取程序集的 CSharpCompilation
-        /// </summary>
-        public CSharpCompilation GetCompilation(string assemblyName)
-        {
-            return _assemblyCompilations.GetValueOrDefault(assemblyName);
         }
 
         /// <summary>
@@ -313,28 +305,26 @@ namespace CompileServer.Services
         /// <summary>
         /// 获取程序集的 AssemblyDefinition
         /// </summary>
-        public AssemblyDefinition GetAssemblyDefinition(string assemblyName, int index)
+        public AssemblyDefinition GetAssemblyDefinition(string assemblyName)
         {
-            var list = _assemblyDefinitions.GetValueOrDefault(assemblyName);
-            if (list == null || list.Count == 0)
-                return null;
-
-            index = index < 0 ? list.Count + index : index;
-            if (index < 0 || index >= list.Count)
-                return null;
-
-            return list[index];
+            return _assemblyDefinitions.GetValueOrDefault(assemblyName);
         }
 
         public void AddAssemblyDefinition(string assemblyName, AssemblyDefinition assemblyDef)
         {
-            var list = _assemblyDefinitions.GetValueOrDefault(assemblyName, new List<AssemblyDefinition>());
-            list.Add(assemblyDef);
+            // 如果已存在旧的 AssemblyDefinition，先释放它
+            if (_assemblyDefinitions.TryGetValue(assemblyName, out var oldAssemblyDef))
+            {
+                oldAssemblyDef?.Dispose();
+            }
+            
+            // 保存最新的 AssemblyDefinition
+            _assemblyDefinitions[assemblyName] = assemblyDef;
         }
 
         public AssemblyDefinition CloneAssemblyDefinition(string assemblyName)
         {
-            var sourceAssembly = GetAssemblyDefinition(assemblyName, -1);
+            var sourceAssembly = GetAssemblyDefinition(assemblyName);
             if (sourceAssembly == null)
                 return null;
 
@@ -351,7 +341,6 @@ namespace CompileServer.Services
             var readerParams = new ReaderParameters
             {
                 ReadWrite = true,
-                InMemory = true,
                 ReadSymbols = true,
                 SymbolReaderProvider = new PortablePdbReaderProvider(),
                 AssemblyResolver = _assemblyResolver,
@@ -367,7 +356,7 @@ namespace CompileServer.Services
         /// </summary>
         public AssemblyDefinition Compile(string assemblyName, bool isModifyName = true)
         {
-            var compilation = GetCompilation(assemblyName);
+            var compilation = _assemblyCompilations.GetValueOrDefault(assemblyName);
             if (compilation == null)
             {
                 _logger.LogWarning($"找不到程序集 {assemblyName} 的编译缓存");
@@ -386,7 +375,6 @@ namespace CompileServer.Services
                 var readerParams = new ReaderParameters
                 {
                     ReadWrite = true,
-                    InMemory = true,
                     ReadSymbols = true,
                     SymbolReaderProvider = new PortablePdbReaderProvider(),
                     AssemblyResolver = _assemblyResolver,
@@ -465,12 +453,9 @@ namespace CompileServer.Services
         private void Clear()
         {
             // 释放AssemblyDefinition资源
-            foreach (var assemblyDefList in _assemblyDefinitions.Values)
+            foreach (var assemblyDef in _assemblyDefinitions.Values)
             {
-                foreach (var assemblyDef in assemblyDefList)
-                {
-                    assemblyDef?.Dispose();
-                }
+                assemblyDef?.Dispose();
             }
 
             // 清除所有缓存
@@ -629,7 +614,7 @@ namespace CompileServer.Services
             _assemblyCompilations[assemblyContext.Name] = compilation;
             
             var assemblyDef = Compile(assemblyContext.Name, false);
-            _assemblyDefinitions[assemblyContext.Name] = [assemblyDef];
+            AddAssemblyDefinition(assemblyContext.Name, assemblyDef);
         }
 
         /// <summary>
@@ -698,16 +683,13 @@ namespace CompileServer.Services
         /// </summary>
         private void BuildTypeCache()
         {
-            foreach (var (assemblyName, assemblyDefList) in _assemblyDefinitions)
+            foreach (var assemblyDef in _assemblyDefinitions.Values)
             {
-                foreach (var assemblyDef in assemblyDefList)
-                {
-                    if (assemblyDef == null || assemblyDef.MainModule == null)
-                        continue;
+                if (assemblyDef == null || assemblyDef.MainModule == null)
+                    continue;
 
-                    // 遍历程序集中的所有类型（包括嵌套类型）
-                    CollectTypesFromAssembly(assemblyDef.MainModule.Types);
-                }
+                // 遍历程序集中的所有类型（包括嵌套类型）
+                CollectTypesFromAssembly(assemblyDef.MainModule.Types);
             }
         }
 

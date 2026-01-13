@@ -320,7 +320,10 @@ namespace FastScriptReload.Editor
                     }
 
                     // 进程退出时自动关闭热重载开关
-                    FastScriptReloadPreference.EnableAutoReloadForChangedFiles = false;
+                    EditorApplication.delayCall += () =>
+                    {
+                        FastScriptReloadPreference.EnableAutoReloadForChangedFiles = false;
+                    };
                 };
 
                 _localProcess.EnableRaisingEvents = true;
