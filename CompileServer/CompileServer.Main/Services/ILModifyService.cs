@@ -62,6 +62,7 @@ namespace CompileServer.Services
             // 生成文件名并保存
             var filePath = Path.Combine(ReloadHelper.AssemblyOutputPath, $"{assemblyDef.Name.Name}.dll");
             assemblyDef.Write(filePath, TypeInfoHelper.WRITER_PARAMETERS);
+            assemblyDef.Dispose();
 
             // 设置每个类型的程序集路径（从全局缓存中获取）
             SetAssemblyPath(filePath, diffResults);
