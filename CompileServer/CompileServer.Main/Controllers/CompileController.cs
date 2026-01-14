@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using CompileServer.Helper;
 using HookInfo.Models;
 using Microsoft.AspNetCore.Mvc;
 using CompileServer.Services;
@@ -11,7 +12,6 @@ namespace CompileServer.Controllers
     public class CompileController : ControllerBase
     {
         private readonly ILogger<CompileController> _logger;
-        private readonly TypeInfoService _typeInfoService;
         private readonly CompileDiffService _compileDiffService;
         private readonly ILModifyService _ilModifyService;
         
@@ -22,13 +22,11 @@ namespace CompileServer.Controllers
         private static bool _isInitialized;
 
         public CompileController(
-            ILogger<CompileController> logger, 
-            TypeInfoService typeInfoService,
+            ILogger<CompileController> logger,
             CompileDiffService compileDiffService,
             ILModifyService ilModifyService)
         {
             _logger = logger;
-            _typeInfoService = typeInfoService;
             _compileDiffService = compileDiffService;
             _ilModifyService = ilModifyService;
         }
@@ -111,7 +109,7 @@ namespace CompileServer.Controllers
 
                 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
                 
-                await _typeInfoService.Initialize(
+                await TypeInfoHelper.Initialize(
                     request.AssemblyContexts,
                     request.PreprocessorDefines
                 );
@@ -122,18 +120,18 @@ namespace CompileServer.Controllers
                 _cachedInitializeRequest = request;
                 _isInitialized = true;
                 
-                _logger.LogInformation($"TypeInfoService initialized successfully in {stopwatch.ElapsedMilliseconds}ms");
+                _logger.LogInformation($"TypeInfoHelper initialized successfully in {stopwatch.ElapsedMilliseconds}ms");
                 
                 return Ok(new
                 {
                     Success = true,
-                    Message = $"TypeInfoService initialized with {request.AssemblyContexts.Count} assemblies",
+                    Message = $"TypeInfoHelper initialized with {request.AssemblyContexts.Count} assemblies",
                     ElapsedMilliseconds = stopwatch.ElapsedMilliseconds
                 });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to initialize TypeInfoService");
+                _logger.LogError(ex, "Failed to initialize TypeInfoHelper");
                 return BadRequest(new
                 {
                     Success = false,
@@ -172,7 +170,7 @@ namespace CompileServer.Controllers
         }
 
         [HttpPost("compile")]
-        public Task<CompileResponse> Compile([FromBody] CompileRequest request)
+        public async Task<CompileResponse> Compile([FromBody] CompileRequest request)
         {
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             
@@ -183,7 +181,7 @@ namespace CompileServer.Controllers
 
                 if (changedFiles.Count == 0)
                 {
-                    return Task.FromResult(new CompileResponse
+                    return await Task.FromResult(new CompileResponse
                     {
                         Success = false,
                         ErrorMessage = "未提供改动的文件列表",
@@ -194,11 +192,11 @@ namespace CompileServer.Controllers
 
                 // 2. 根据文件路径自动确定程序集（从初始化缓存中查找）
                 // 根据第一个文件确定程序集（同一批文件应该属于同一程序集）
-                string assemblyName = _typeInfoService.GetAssemblyName(changedFiles[0]);
+                string assemblyName = TypeInfoHelper.GetAssemblyName(changedFiles[0]);
                 if (string.IsNullOrEmpty(assemblyName))
                 {
                     _logger.LogWarning($"无法确定文件 '{changedFiles[0]}' 所属的程序集");
-                    return Task.FromResult(new CompileResponse
+                    return await Task.FromResult(new CompileResponse
                     {
                         Success = false,
                         ErrorMessage = $"无法确定文件所属的程序集，请确保已调用 /api/initialize 初始化",
@@ -210,7 +208,7 @@ namespace CompileServer.Controllers
                 // 验证所有文件是否属于同一程序集
                 foreach (var file in changedFiles.Skip(1))
                 {
-                    var fileAssemblyName = _typeInfoService.GetAssemblyName(file);
+                    var fileAssemblyName = TypeInfoHelper.GetAssemblyName(file);
                     if (!string.IsNullOrEmpty(fileAssemblyName) && fileAssemblyName != assemblyName)
                     {
                         _logger.LogWarning($"文件 '{file}' 属于程序集 '{fileAssemblyName}'，与第一个文件 '{changedFiles[0]}' 的程序集 '{assemblyName}' 不一致");
@@ -220,12 +218,12 @@ namespace CompileServer.Controllers
                 _logger.LogInformation($"Compile request received for assembly: {assemblyName}, {changedFiles.Count} changed files");
 
                 // 3. 调用 CompileAndDiff 进行编译和差异分析
-                var diffResults = _compileDiffService.CompileAndDiff(assemblyName, changedFiles);
+                var diffResults = await _compileDiffService.CompileAndDiff(assemblyName, changedFiles);
                 
                 if (diffResults == null || diffResults.Count == 0)
                 {
                     _logger.LogWarning($"No differences found for assembly: {assemblyName}");
-                    return Task.FromResult(new CompileResponse
+                    return await Task.FromResult(new CompileResponse
                     {
                         Success = true,
                         HookTypeInfos = new Dictionary<string, HookTypeInfo>(),
@@ -238,16 +236,15 @@ namespace CompileServer.Controllers
                 _logger.LogInformation($"Compile and diff completed in {stopwatch.ElapsedMilliseconds}ms, found {diffResults.Count} changed types");
 
                 // 4. 调用 IL 修改服务生成 Wrapper 程序集
-                string wrapperPath;
                 try
                 {
-                    wrapperPath = _ilModifyService.ModifyCompileAssembly(assemblyName, diffResults);
+                    var wrapperPath = _ilModifyService.ModifyCompileAssembly(assemblyName, diffResults);
                     _logger.LogInformation($"Wrapper assembly generated: {wrapperPath}");
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to generate wrapper assembly");
-                    return Task.FromResult(new CompileResponse
+                    return await Task.FromResult(new CompileResponse
                     {
                         Success = false,
                         ErrorMessage = $"IL modification failed: {ex.Message}",
@@ -270,7 +267,7 @@ namespace CompileServer.Controllers
                     var hookTypeInfo = new HookTypeInfo
                     {
                         TypeFullName = cachedHookTypeInfo.TypeFullName,
-                        OriginalAssemblyName = cachedHookTypeInfo.OriginalAssemblyName
+                        AssemblyName = cachedHookTypeInfo.AssemblyName
                     };
 
                     // 从 DiffResult 中提取本次改动的方法
@@ -298,7 +295,7 @@ namespace CompileServer.Controllers
                     }
                 }
 
-                return Task.FromResult(new CompileResponse
+                return await Task.FromResult(new CompileResponse
                 {
                     Success = true,
                     HookTypeInfos = hookTypeInfos,
@@ -310,7 +307,7 @@ namespace CompileServer.Controllers
             {
                 stopwatch.Stop();
                 _logger.LogError(ex, $"Compile failed: {ex.Message}");
-                return Task.FromResult(new CompileResponse
+                return await Task.FromResult(new CompileResponse
                 {
                     Success = false,
                     ErrorMessage = ex.Message,

@@ -154,7 +154,7 @@ namespace FastScriptReload.Editor
                 }
                 else
                 {
-                    LoggerScoped.LogError("CompileServer 初始化失败，热重载功能将不可用1234");
+                    LoggerScoped.LogError("CompileServer 初始化失败，热重载功能将不可用");
                 }
             }
             catch (Exception ex)

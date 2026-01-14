@@ -3,7 +3,7 @@ using System.Collections.Generic;
 namespace HookInfo.Models
 {
     /// <summary>
-    /// TypeInfoService 初始化请求
+    /// TypeInfoHelper 初始化请求
     /// </summary>
     public class InitializeRequest
     {

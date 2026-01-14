@@ -1,4 +1,4 @@
-using System.Linq;
+using CompileServer.Helper;
 using CompileServer.Helpers;
 using CompileServer.Models;
 using HookInfo.Models;
@@ -20,12 +20,10 @@ namespace CompileServer.Services
     public class ILModifyService
     {
         private readonly ILogger<ILModifyService> _logger;
-        private readonly TypeInfoService _typeInfoService;
 
-        public ILModifyService(ILogger<ILModifyService> logger, TypeInfoService typeInfoService)
+        public ILModifyService(ILogger<ILModifyService> logger)
         {
             _logger = logger;
-            _typeInfoService = typeInfoService;
         }
 
         /// <summary>
@@ -33,7 +31,7 @@ namespace CompileServer.Services
         /// </summary>
         public string ModifyCompileAssembly(string assemblyName, Dictionary<string, DiffResult> diffResults)
         {
-            var assemblyDef = _typeInfoService.CloneAssemblyDefinition(assemblyName);
+            var assemblyDef = TypeInfoHelper.CloneAssemblyDefinition(assemblyName);
             if (assemblyDef == null)
             {
                 throw new Exception($"无法克隆程序集: {assemblyName}");
@@ -49,79 +47,50 @@ namespace CompileServer.Services
                     cachedHookTypeInfo = new HookTypeInfo
                     {
                         TypeFullName = typeFullName,
-                        OriginalAssemblyName = assemblyName,
+                        AssemblyName = assemblyName,
                     };
                     ReloadHelper.HookTypeInfoCache[typeFullName] = cachedHookTypeInfo;
                 }
             }
 
             // 修改程序集
-            HandleAssemblyType(assemblyName, assemblyDef, diffResults);
+            HandleAssemblyType(assemblyDef, diffResults);
 
             // 清理程序集
             ClearAssembly(assemblyDef, diffResults);
 
             // 生成文件名并保存
             var filePath = Path.Combine(ReloadHelper.AssemblyOutputPath, $"{assemblyDef.Name.Name}.dll");
-
-            // 确保目录存在
-            var directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            assemblyDef.Write(filePath, TypeInfoService.WRITER_PARAMETERS);
+            assemblyDef.Write(filePath, TypeInfoHelper.WRITER_PARAMETERS);
 
             // 设置每个类型的程序集路径（从全局缓存中获取）
-            foreach (var (typeFullName, diffResult) in diffResults)
-            {
-                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeFullName, out var hookTypeInfo))
-                {
-                    continue;
-                }
-
-                SetAssemblyPath(hookTypeInfo, filePath, diffResult);
-            }
+            SetAssemblyPath(filePath, diffResults);
 
             return filePath;
         }
 
-        private void HandleAssemblyType(string assemblyName, AssemblyDefinition assemblyDef, Dictionary<string, DiffResult> diffResults)
+        private void HandleAssemblyType(AssemblyDefinition assemblyDef, Dictionary<string, DiffResult> diffResults)
         {
             var mainModule = assemblyDef.MainModule;
 
-            foreach (var (typeName, result) in diffResults)
+            // 先处理新增字段、注册方法到HookTypeInfo中
+            foreach (var (typeName, diffResult) in diffResults)
             {
                 var typeDef = mainModule.GetType(typeName);
                 if (typeDef == null)
                 {
-                    _logger.LogWarning($"未找到类型: {typeName}");
                     continue;
                 }
 
-                // 从全局缓存中获取或创建 HookTypeInfo（与 Unity 端一致）
                 if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
                 {
-                    hookTypeInfo = new HookTypeInfo
-                    {
-                        TypeFullName = typeDef.FullName,
-                        OriginalAssemblyName = assemblyName,
-                    };
-                    ReloadHelper.HookTypeInfoCache[typeDef.FullName] = hookTypeInfo;
-                }
-
-                typeDef.Interfaces.Clear();
-                bool setBaseType = typeDef.BaseType != null && typeDef.BaseType.FullName != "System.Object";
-                if (setBaseType)
-                {
-                    typeDef.BaseType = mainModule.TypeSystem.Object;
+                    continue;
                 }
 
                 // 处理新增字段
                 foreach (var fieldDef in typeDef.Fields)
                 {
-                    if (result.AddedFields.ContainsKey(fieldDef.FullName))
+                    if (diffResult.AddedFields.ContainsKey(fieldDef.FullName))
                     {
                         hookTypeInfo.AddedFields.TryAdd(fieldDef.FullName, new HookFieldInfo(fieldDef));
                     }
@@ -131,30 +100,12 @@ namespace CompileServer.Services
                 for (int i = typeDef.Methods.Count - 1; i >= 0; i--)
                 {
                     var methodDef = typeDef.Methods[i];
-                    if (!result.ModifiedMethods.TryGetValue(methodDef.FullName, out var methodDiffInfo))
+                    if (!diffResult.ModifiedMethods.TryGetValue(methodDef.FullName, out var methodDiffInfo))
                     {
                         continue;
                     }
 
-                    var hookMethodName = methodDef.FullName;
-
-                    // 将@this参数加入到方法参数列表的头部
-                    if (!methodDef.IsStatic)
-                    {
-                        methodDef.Parameters.Insert(0, new ParameterDefinition("this", ParameterAttributes.None, typeDef));
-                        methodDef.HasThis = false;
-                        methodDef.ExplicitThis = false;
-                    }
-
-                    methodDef.Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig;
-                    methodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
-
-                    if (setBaseType)
-                    {
-                        methodDef.Overrides.Clear();
-                    }
-
-                    hookTypeInfo.AddOrModifyMethod(hookMethodName, methodDef, methodDiffInfo.ModifyState);
+                    hookTypeInfo.AddOrModifyMethod(methodDef.FullName, methodDef, methodDiffInfo.ModifyState);
                 }
             }
 
@@ -179,11 +130,7 @@ namespace CompileServer.Services
                         continue;
                     }
 
-                    // 直接使用 WrapperMethodDef，与原始逻辑一致
-                    if (hookMethodInfo.WrapperMethodDef != null)
-                    {
-                        HandleMethodDefinition(hookMethodInfo.WrapperMethodDef, mainModule);
-                    }
+                    HandleMethodDefinition(hookMethodInfo.WrapperMethodDef, mainModule);
                 }
             }
 
@@ -197,7 +144,7 @@ namespace CompileServer.Services
                 }
 
                 // 内部类是Task生成出来的状态机，则保留整个内部类
-                bool isTaskStateMachine = TypeInfoService.TypeIsTaskStateMachine(typeDef);
+                bool isTaskStateMachine = TypeInfoHelper.TypeIsTaskStateMachine(typeDef);
                 foreach (var methodDef in typeDef.Methods.ToArray())
                 {
                     bool isHandleMethodDef = isTaskStateMachine || methodDef.FullName.Contains("ctor");
@@ -225,6 +172,56 @@ namespace CompileServer.Services
                     }
                 }
             }
+
+            // 给所有方法加上this参数
+            foreach (var (typeName, result) in diffResults)
+            {
+                var typeDef = mainModule.GetType(typeName);
+                if (typeDef == null)
+                {
+                    continue;
+                }
+
+                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
+                {
+                    continue;
+                }
+
+                typeDef.Interfaces.Clear();
+                bool setBaseType = typeDef.BaseType != null && typeDef.BaseType.FullName != "System.Object";
+                if (setBaseType)
+                {
+                    typeDef.BaseType = mainModule.TypeSystem.Object;
+                }
+
+                foreach (var (methodFullName, _) in result.ModifiedMethods)
+                {
+                    if (!hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var hookMethodInfo))
+                    {
+                        continue;
+                    }
+
+                    var methodDef = hookMethodInfo.WrapperMethodDef;
+
+                    // 将@this参数加入到方法参数列表的头部
+                    if (!methodDef.IsStatic)
+                    {
+                        methodDef.Parameters.Insert(0, new ParameterDefinition("this", ParameterAttributes.None, typeDef));
+                        methodDef.HasThis = false;
+                        methodDef.ExplicitThis = false;
+                    }
+
+                    methodDef.Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig;
+                    methodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
+
+                    if (setBaseType)
+                    {
+                        methodDef.Overrides.Clear();
+                    }
+
+                    hookMethodInfo.WrapperMethodName = methodDef.FullName;
+                }
+            }            
         }
 
         /// <summary>
@@ -307,25 +304,33 @@ namespace CompileServer.Services
         /// <summary>
         /// 设置程序集路径
         /// </summary>
-        private void SetAssemblyPath(HookTypeInfo hookTypeInfo, string assemblyPath, DiffResult diffResult)
+        private void SetAssemblyPath(string assemblyPath, Dictionary<string, DiffResult> diffResults)
         {
-            foreach (var (_, methodInfo) in diffResult.ModifiedMethods)
+            foreach (var (typeFullName, diffResult) in diffResults)
             {
-                if (hookTypeInfo.ModifiedMethods.TryGetValue(methodInfo.FullName, out var modifiedMethodInfo))
+                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeFullName, out var hookTypeInfo))
                 {
-                    modifiedMethodInfo.AssemblyPath = assemblyPath;
-                    if (modifiedMethodInfo.MemberModifyState == MemberModifyState.Added)
+                    continue;
+                }
+
+                foreach (var (_, methodInfo) in diffResult.ModifiedMethods)
+                {
+                    if (hookTypeInfo.ModifiedMethods.TryGetValue(methodInfo.FullName, out var modifiedMethodInfo))
                     {
-                        modifiedMethodInfo.HistoricalHookedAssemblyPaths.Add(assemblyPath);
+                        modifiedMethodInfo.AssemblyPath = assemblyPath;
+                        if (modifiedMethodInfo.MemberModifyState == MemberModifyState.Added)
+                        {
+                            modifiedMethodInfo.HistoricalHookedAssemblyPaths.Add(assemblyPath);
+                        }
                     }
                 }
-            }
 
-            foreach (var (_, fieldInfo) in diffResult.AddedFields)
-            {
-                if (hookTypeInfo.AddedFields.TryGetValue(fieldInfo.FullName, out var addedFieldInfo))
+                foreach (var (_, fieldInfo) in diffResult.AddedFields)
                 {
-                    addedFieldInfo.AssemblyPath = assemblyPath;
+                    if (hookTypeInfo.AddedFields.TryGetValue(fieldInfo.FullName, out var addedFieldInfo))
+                    {
+                        addedFieldInfo.AssemblyPath = assemblyPath;
+                    }
                 }
             }
         }
@@ -413,7 +418,7 @@ namespace CompileServer.Services
         private MethodReference HandleMethodReference(MethodReference methodRef, ModuleDefinition module)
         {
             // 编译时创建的内部类的成员后续统一处理
-            if (TypeInfoService.IsCompilerGeneratedType(methodRef.DeclaringType as TypeDefinition))
+            if (TypeInfoHelper.IsCompilerGeneratedType(methodRef.DeclaringType as TypeDefinition))
             {
                 if (NestedTypeInfo.AddMethod(methodRef))
                 {
@@ -422,9 +427,9 @@ namespace CompileServer.Services
                 return methodRef;
             }
 
-            if (TypeInfoService.IsTaskCallStartMethod(methodRef))
+            if (TypeInfoHelper.IsTaskCallStartMethod(methodRef))
             {
-                var callMethodDef = TypeInfoService.FindTaskCallMethod(methodRef);
+                var callMethodDef = TypeInfoHelper.FindTaskCallMethod(methodRef);
                 if (NestedTypeInfo.AddMethod(callMethodDef))
                 {
                     HandleMethodDefinition(callMethodDef, module);
@@ -442,16 +447,16 @@ namespace CompileServer.Services
             {
                 var methodName = methodRef.IsGenericInstance ? methodRef.GetElementMethod().FullName : methodRef.FullName;
 
-                if (hookTypeInfo.TryGetMethod(methodName, out var methodInfo))
+                if (hookTypeInfo.ModifiedMethods.TryGetValue(methodName, out var methodInfo))
                 {
-                    if (methodInfo.MemberModifyState == MemberModifyState.Added)
-                    {
-                        return module.ImportReference(methodInfo.WrapperMethodDef);
-                    }
-
                     if(methodRef is GenericInstanceMethod genericInstance)
                     {
                         return CreateGenericInstanceMethod(methodInfo.WrapperMethodDef, genericInstance.GenericArguments, module);
+                    }
+                    
+                    if (methodInfo.MemberModifyState == MemberModifyState.Added)
+                    {
+                        return module.ImportReference(methodInfo.WrapperMethodDef);
                     }
                 }
             }
@@ -537,7 +542,7 @@ namespace CompileServer.Services
             }
 
             // 编译时创建的内部类的成员后续统一处理
-            if (TypeInfoService.IsCompilerGeneratedType(fieldRef.DeclaringType as TypeDefinition))
+            if (TypeInfoHelper.IsCompilerGeneratedType(fieldRef.DeclaringType as TypeDefinition))
             {
                 NestedTypeInfo.AddField(fieldRef);
                 processor.Append(inst);
@@ -632,7 +637,7 @@ namespace CompileServer.Services
             }
 
             // 编译时生成的类型不需要处理
-            if (TypeInfoService.IsCompilerGeneratedType(typeRef as TypeDefinition))
+            if (TypeInfoHelper.IsCompilerGeneratedType(typeRef as TypeDefinition))
             {
                 return false;
             }
@@ -713,7 +718,7 @@ namespace CompileServer.Services
                 };
             }
 
-            var originalTypeDef = _typeInfoService.GetOriginalTypeDefinition(typeRef.FullName);
+            var originalTypeDef = TypeInfoHelper.GetOriginalTypeDefinition(typeRef);
             if (originalTypeDef != null)
             {
                 // 找到原类型，导入引用并返回

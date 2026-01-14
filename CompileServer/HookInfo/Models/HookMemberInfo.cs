@@ -65,7 +65,6 @@ public class HookMethodInfo : IHookMemberInfo
         MemberFullName = hookMethodName;
         WrapperMethodDef = wrapperMethodDef;
         TypeFullName = wrapperMethodDef?.DeclaringType.FullName;
-        WrapperMethodName = wrapperMethodDef?.FullName;
         HasGenericParameters = wrapperMethodDef?.HasGenericParameters ?? false;
         MemberModifyState = memberModifyState;
     }

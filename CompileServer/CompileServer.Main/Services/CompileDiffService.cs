@@ -1,8 +1,5 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
+using CompileServer.Helper;
 using CompileServer.Models;
-using Microsoft.Extensions.Logging;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using HookInfo.Models;
@@ -15,22 +12,20 @@ namespace CompileServer.Services
     public class CompileDiffService
     {
         private readonly ILogger<CompileDiffService> _logger;
-        private readonly TypeInfoService _typeInfoService;
 
-        public CompileDiffService(ILogger<CompileDiffService> logger, TypeInfoService typeInfoService)
+        public CompileDiffService(ILogger<CompileDiffService> logger)
         {
             _logger = logger;
-            _typeInfoService = typeInfoService;
         }
 
         /// <summary>
         /// 编译并返回Diff结果
         /// </summary>
-        public Dictionary<string, DiffResult> CompileAndDiff(string assemblyName, List<string> files)
+        public async Task<Dictionary<string, DiffResult>> CompileAndDiff(string assemblyName, List<string> files)
         {
-            _typeInfoService.UpdateSyntaxTrees(assemblyName, files);
+            await TypeInfoHelper.UpdateSyntaxTrees(assemblyName, files);
 
-            var assemblyDef = _typeInfoService.Compile(assemblyName);
+            var assemblyDef = await TypeInfoHelper.Compile(assemblyName);
             if (assemblyDef == null)
             {
                 return null;
@@ -42,7 +37,7 @@ namespace CompileServer.Services
                 return null;
             }
 
-            _typeInfoService.AddAssemblyDefinition(assemblyName, assemblyDef);
+            TypeInfoHelper.AddAssemblyDefinition(assemblyName, assemblyDef);
 
             return diffResult;
         }
@@ -56,7 +51,7 @@ namespace CompileServer.Services
         /// <returns>类型差异结果字典，Key为类型全名，Value为差异结果</returns>
         private Dictionary<string, DiffResult> DiffAssembly(string assemblyName, List<string> files, AssemblyDefinition newAssemblyDef)
         {
-            var oldAssemblyDef = _typeInfoService.GetAssemblyDefinition(assemblyName);
+            var oldAssemblyDef = TypeInfoHelper.GetAssemblyDefinition(assemblyName);
             if (newAssemblyDef == null || oldAssemblyDef == null)
             {
                 _logger.LogError($"无法获取程序集 {assemblyName}");
@@ -64,7 +59,7 @@ namespace CompileServer.Services
             }
 
             // 获取改动文件中的类型
-            var changedTypes = _typeInfoService.GetTypesFromFiles(files);
+            var changedTypes = TypeInfoHelper.GetTypesFromFiles(files);
             if (changedTypes.Count == 0)
             {
                 _logger.LogDebug("改动文件中没有找到类型定义");
@@ -138,7 +133,7 @@ namespace CompileServer.Services
                 return null;
             }
 
-            _typeInfoService.UpdateMethodCallGraph(diffResults);
+            TypeInfoHelper.UpdateMethodCallGraph(diffResults);
 
             // 如果泛型方法被修改，将泛型方法的调用者加入修改列表
             foreach (var (typeFullName, diffResult) in diffResults.ToArray())
@@ -150,7 +145,7 @@ namespace CompileServer.Services
                         continue;
                     }
 
-                    var callers = _typeInfoService.FindMethodCallers(methodName);
+                    var callers = TypeInfoHelper.FindMethodCallers(methodName);
                     if (callers == null)
                     {
                         continue;
@@ -170,7 +165,7 @@ namespace CompileServer.Services
                             {
                                 FullName = callerMethodName,
                                 ModifyState = MemberModifyState.Modified,
-                                MethodDefinition = methodCallInfo.MethodDef
+                                // MethodDefinition = methodCallInfo.MethodDef
                             });
                         }
                     }
@@ -454,11 +449,11 @@ namespace CompileServer.Services
             }
 
             // FullName 一致时，检查是否是Task状态机调用
-            if (TypeInfoService.IsTaskCallStartMethod(existingMethodRef))
+            if (TypeInfoHelper.IsTaskCallStartMethod(existingMethodRef))
             {
                 // 查找状态机类型的 MoveNext 方法
-                var existingMoveNext = TypeInfoService.FindTaskCallMethod(existingMethodRef);
-                var newMoveNext = TypeInfoService.FindTaskCallMethod(newMethodRef);
+                var existingMoveNext = TypeInfoHelper.FindTaskCallMethod(existingMethodRef);
+                var newMoveNext = TypeInfoHelper.FindTaskCallMethod(newMethodRef);
 
                 // 比较 MoveNext 方法定义
                 var res = CompareMethodDefinitions(existingMoveNext, newMoveNext);

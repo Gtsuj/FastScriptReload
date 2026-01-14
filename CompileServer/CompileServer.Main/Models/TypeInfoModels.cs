@@ -1,3 +1,4 @@
+using Microsoft.CodeAnalysis;
 using Mono.Cecil;
 
 namespace CompileServer.Models
@@ -60,8 +61,8 @@ namespace CompileServer.Models
     /// </summary>
     public class FileSnapshot
     {
-        public string FilePath { get; set; } = string.Empty;
-        public Microsoft.CodeAnalysis.SyntaxTree SyntaxTree { get; set; }
+        public string FilePath { get; set; }
+        public SyntaxTree SyntaxTree { get; set; }
         public DateTime SnapshotTime { get; set; }
 
         public FileSnapshot(string path)
@@ -78,18 +79,11 @@ namespace CompileServer.Models
     {
         public readonly string TypeName;
         public readonly string MethodName;
-        public readonly MethodDefinition MethodDef;
-
-        public GenericMethodCallInfo(string typeName, string methodName)
-        {
-            TypeName = typeName;
-            MethodName = methodName;
-            MethodDef = null;
-        }
+        // public readonly MethodDefinition MethodDef;
 
         public GenericMethodCallInfo(MethodDefinition methodDef)
         {
-            MethodDef = methodDef;
+            // MethodDef = methodDef;
             TypeName = methodDef.DeclaringType.IsGenericInstance 
                 ? methodDef.DeclaringType.GetElementType().FullName 
                 : methodDef.DeclaringType.FullName;

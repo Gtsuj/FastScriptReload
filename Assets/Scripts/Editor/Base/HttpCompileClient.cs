@@ -219,6 +219,69 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
+        /// 初始化 TypeInfoService
+        /// </summary>
+        public async Task<bool> InitializeAsync(Dictionary<string, AssemblyContext> assemblyContexts, string[] preprocessorDefines)
+        {
+            try
+            {
+                var request = new InitializeRequest
+                {
+                    AssemblyContexts = assemblyContexts,
+                    PreprocessorDefines = preprocessorDefines,
+                    ProjectPath = Path.GetDirectoryName(Application.dataPath) ?? string.Empty
+                };
+
+                var json = JsonConvert.SerializeObject(request, JsonSettings);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                var response = await _httpClient.PostAsync("/api/initialize", content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var error = await response.Content.ReadAsStringAsync();
+                    LoggerScoped.LogError($"❌ 初始化请求失败: {response.StatusCode}\n{error}");
+                    return false;
+                }
+
+                var responseJson = await response.Content.ReadAsStringAsync();
+
+                // 尝试解析响应（可能包含或不包含 HookTypeInfos）
+                var resultWithHooks = JsonConvert.DeserializeAnonymousType(responseJson, new
+                {
+                    Success = false,
+                    Message = "",
+                    ElapsedMilliseconds = 0L,
+                    HookTypeInfos = (Dictionary<string, HookTypeInfo>)null
+                });
+
+                if (resultWithHooks != null && resultWithHooks.Success)
+                {
+                    // 如果返回了缓存的HookTypeInfos，应用它们（用于Unity Reload Domain后重建Hook）
+                    // 注意：首次初始化时不会返回 HookTypeInfos
+                    if (resultWithHooks.HookTypeInfos != null && resultWithHooks.HookTypeInfos.Count > 0)
+                    {
+                        LoggerScoped.LogDebug($"收到缓存的HookTypeInfos: {resultWithHooks.HookTypeInfos.Count} 个类型，开始重建Hook");
+                        ReloadHelper.ApplyHooks(resultWithHooks.HookTypeInfos);
+                        LoggerScoped.LogDebug($"Hook重建完成");
+                    }
+
+                    return true;
+                }
+                else
+                {
+                    LoggerScoped.LogError($"❌ TypeInfoService 初始化失败");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerScoped.LogError($"❌ 初始化请求异常: {ex.Message}\n{ex.StackTrace}");
+                return false;
+            }
+        }        
+        
+        /// <summary>
         /// 获取缓存的 HookTypeInfos（同步接口，用于 RebuildHook）
         /// </summary>
         public Dictionary<string, HookTypeInfo> GetHookTypeInfos(string projectPath = null)
@@ -341,72 +404,6 @@ namespace FastScriptReload.Editor
         }
 
         /// <summary>
-        /// 初始化 TypeInfoService
-        /// </summary>
-        public async Task<bool> InitializeAsync(
-            Dictionary<string, AssemblyContext> assemblyContexts,
-            string[] preprocessorDefines,
-            CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                var request = new InitializeRequest
-                {
-                    AssemblyContexts = assemblyContexts,
-                    PreprocessorDefines = preprocessorDefines,
-                    ProjectPath = Path.GetDirectoryName(Application.dataPath) ?? string.Empty
-                };
-
-                var json = JsonConvert.SerializeObject(request, JsonSettings);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                var response = await _httpClient.PostAsync("/api/initialize", content, cancellationToken);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    var error = await response.Content.ReadAsStringAsync();
-                    LoggerScoped.LogError($"❌ 初始化请求失败: {response.StatusCode}\n{error}");
-                    return false;
-                }
-
-                var responseJson = await response.Content.ReadAsStringAsync();
-
-                // 尝试解析响应（可能包含或不包含 HookTypeInfos）
-                var resultWithHooks = JsonConvert.DeserializeAnonymousType(responseJson, new
-                {
-                    Success = false,
-                    Message = "",
-                    ElapsedMilliseconds = 0L,
-                    HookTypeInfos = (Dictionary<string, HookTypeInfo>)null
-                });
-
-                if (resultWithHooks != null && resultWithHooks.Success)
-                {
-                    // 如果返回了缓存的HookTypeInfos，应用它们（用于Unity Reload Domain后重建Hook）
-                    // 注意：首次初始化时不会返回 HookTypeInfos
-                    if (resultWithHooks.HookTypeInfos != null && resultWithHooks.HookTypeInfos.Count > 0)
-                    {
-                        LoggerScoped.LogDebug($"收到缓存的HookTypeInfos: {resultWithHooks.HookTypeInfos.Count} 个类型，开始重建Hook");
-                        ReloadHelper.ApplyHooks(resultWithHooks.HookTypeInfos);
-                        LoggerScoped.LogDebug($"Hook重建完成");
-                    }
-
-                    return true;
-                }
-                else
-                {
-                    LoggerScoped.LogError($"❌ TypeInfoService 初始化失败");
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogError($"❌ 初始化请求异常: {ex.Message}\n{ex.StackTrace}");
-                return false;
-            }
-        }
-
-        /// <summary>
         /// 清除所有 Output 和 HookTypeInfo 缓存
         /// </summary>
         public async Task<bool> ClearAsync()
@@ -481,110 +478,6 @@ namespace FastScriptReload.Editor
                 LoggerScoped.LogError($"❌ 编译请求异常: {ex.Message}\n{ex.StackTrace}");
                 return null;
             }
-        }
-
-        /// <summary>
-        /// 构建程序集上下文
-        /// </summary>
-        private AssemblyContext BuildAssemblyContext(string assemblyName)
-        {
-            var assembly = CompilationPipeline.GetAssemblies()
-                .FirstOrDefault(a => a.name == assemblyName);
-
-            if (assembly == null)
-                return null;
-
-            // 获取项目根目录
-            var projectRoot = Path.GetDirectoryName(Application.dataPath);
-
-            return new AssemblyContext // ✅ 使用共享类型
-            {
-                Name = assembly.name,
-                OutputPath = Path.GetFullPath(Path.Combine(projectRoot, assembly.outputPath)),
-                SourceFiles = assembly.sourceFiles
-                    .Select(f => Path.GetFullPath(Path.Combine(projectRoot, f)))
-                    .ToArray(),
-                References = assembly.assemblyReferences
-                    .Select(r => new AssemblyReference // ✅ 使用共享类型
-                    {
-                        Name = r.name,
-                        Path = Path.GetFullPath(Path.Combine(projectRoot, r.outputPath))
-                    })
-                    .Concat(assembly.compiledAssemblyReferences
-                        .Select(path => new AssemblyReference
-                        {
-                            Name = Path.GetFileNameWithoutExtension(path),
-                            Path = Path.GetFullPath(path) // 编译引用通常已经是绝对路径
-                        }))
-                    .ToArray(),
-                PreprocessorDefines = EditorUserBuildSettings.activeScriptCompilationDefines,
-                AllowUnsafeCode = assembly.compilerOptions.AllowUnsafeCode
-            };
-        }
-
-        /// <summary>
-        /// 恢复缓存
-        /// </summary>
-        public async Task<CompileResponse> RestoreCacheAsync(CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                var response = await _httpClient.GetAsync("/api/cache/restore", cancellationToken);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    LoggerScoped.LogWarning("⚠️ 缓存恢复失败,可能是首次启动");
-                    return null;
-                }
-
-                var json = await response.Content.ReadAsStringAsync();
-                return JsonConvert.DeserializeObject<CompileResponse>(json, JsonSettings);
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogWarning($"⚠️ 缓存恢复异常: {ex.Message}");
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// 清除缓存
-        /// </summary>
-        public async Task ClearCacheAsync()
-        {
-            try
-            {
-                await _httpClient.DeleteAsync("/api/cache");
-                LoggerScoped.Log("🗑️ 缓存已清除");
-            }
-            catch (Exception ex)
-            {
-                LoggerScoped.LogWarning($"⚠️ 清除缓存失败: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// 获取缓存统计
-        /// </summary>
-        public async Task<string> GetCacheStatsAsync()
-        {
-            try
-            {
-                var response = await _httpClient.GetAsync("/api/cache/stats");
-                return await response.Content.ReadAsStringAsync();
-            }
-            catch (Exception ex)
-            {
-                return $"获取统计失败: {ex.Message}";
-            }
-        }
-
-        /// <summary>
-        /// 检查本地进程状态
-        /// </summary>
-        public bool IsLocalProcessRunning()
-        {
-            return _localProcess != null && !_localProcess.HasExited;
         }
 
         /// <summary>

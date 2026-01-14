@@ -128,7 +128,14 @@ namespace CompileServer.Services
             var outputPath = AssemblyOutputPath;
             if (Directory.Exists(outputPath))
             {
-                Directory.Delete(outputPath, true);
+                try
+                {
+                    Directory.Delete(outputPath, true);
+                }
+                catch (Exception e)
+                {
+                    // ignored
+                }
             }
         }
     }

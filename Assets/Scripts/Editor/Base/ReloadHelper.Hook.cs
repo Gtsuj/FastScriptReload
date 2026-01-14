@@ -39,7 +39,7 @@ namespace FastScriptReload.Editor
         private static void HookMethod(HookTypeInfo hookTypeInfo)
         {
             var typeFullName = hookTypeInfo.TypeFullName;
-            var originType = Type.GetType($"{typeFullName},{hookTypeInfo.OriginalAssemblyName}");
+            var originType = Type.GetType($"{typeFullName},{hookTypeInfo.AssemblyName}");
 
             foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
             {
@@ -55,14 +55,19 @@ namespace FastScriptReload.Editor
                 Type wrapperType = wrapperAssembly.GetType(typeFullName);
                 if (wrapperType == null)
                 {
-                    LoggerScoped.LogWarning($"在 Wrapper 程序集中找不到类型: {typeFullName}");
-                    return;
+                    var errorMsg = $"在 Wrapper 程序集中找不到类型: {typeFullName}";
+                    LoggerScoped.LogError(errorMsg);
+                    FastScriptReloadHookDetailsWindow.NotifyMemberHooked(modifiedMethod.WrapperMethodName, false, errorMsg);
+                    continue;
                 }
 
                 // 获取 Wrapper 类型中的所有静态方法（公有和私有）
                 var wrapperMethod = wrapperType.GetMethodByMethodDefName(modifiedMethod.WrapperMethodName);
                 if (wrapperMethod == null)
                 {
+                    var errorMsg = $"在 Wrapper 程序集中找不到方法 {modifiedMethod.WrapperMethodName}";
+                    LoggerScoped.LogError(errorMsg);
+                    FastScriptReloadHookDetailsWindow.NotifyMemberHooked(modifiedMethod.WrapperMethodName, false, errorMsg);
                     continue;
                 }
 

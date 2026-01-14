@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using CompileServer.Models;
+using CompileServer.Services;
 using HookInfo.Models;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -12,74 +14,72 @@ using Mono.Cecil;
 using Mono.Cecil.Cil;
 using Mono.Collections.Generic;
 
-namespace CompileServer.Services
+namespace CompileServer.Helper
 {
     /// <summary>
-    /// 类型信息服务 - 管理编译、语法分析和方法调用图
+    /// 类型信息辅助类 - 管理编译、语法分析和方法调用图
     /// </summary>
-    public class TypeInfoService
+    public static class TypeInfoHelper
     {
-        private readonly ILogger<TypeInfoService> _logger;
-        private readonly string _projectPath;
-        
         public static readonly EmitOptions EMIT_OPTIONS = new(debugInformationFormat: DebugInformationFormat.PortablePdb);
+
         public static readonly WriterParameters WRITER_PARAMETERS = new() { WriteSymbols = true, SymbolWriterProvider = new PortablePdbWriterProvider() };
 
         #region 私有字段
 
-        private CSharpParseOptions _parseOptions;
+        private static CSharpParseOptions _parseOptions;
+
+        private static Dictionary<string, AssemblyContext> _assemblyContext;
+        
+        /// <summary>
+        /// Assembly 解析器缓存
+        /// </summary>
+        private static DefaultAssemblyResolver _assemblyResolver;
 
         /// <summary>
         /// Assembly 名称 -> CSharpCompilation 的缓存
         /// </summary>
-        private readonly ConcurrentDictionary<string, CSharpCompilation> _assemblyCompilations = new();
+        private static readonly ConcurrentDictionary<string, CSharpCompilation> _assemblyCompilations = new();
 
         /// <summary>
         /// Assembly 名称 -> AssemblyDefinition 的缓存（用于 Mono.Cecil 分析）
         /// </summary>
-        private readonly Dictionary<string, AssemblyDefinition> _assemblyDefinitions = new();
+        private static readonly Dictionary<string, AssemblyDefinition> _assemblyDefinitions = new();
 
         /// <summary>
         /// 方法调用图索引：方法签名 -> 调用者方法信息集合
         /// </summary>
-        private readonly ConcurrentDictionary<string, Dictionary<string, GenericMethodCallInfo>> _methodCallGraph = new();
+        private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, GenericMethodCallInfo>> _methodCallGraph = new(Environment.ProcessorCount, 1000);
 
         /// <summary>
         /// 文件路径 -> Assembly 名称
         /// </summary>
-        private readonly ConcurrentDictionary<string, string> _fileToAssembly = new();
+        private static readonly ConcurrentDictionary<string, string> _fileToAssembly = new();
 
         /// <summary>
         /// 文件路径 -> FileSnapshot 的缓存
         /// </summary>
-        private readonly ConcurrentDictionary<string, FileSnapshot> _fileSnapshots = new();
-
-        /// <summary>
-        /// Assembly 解析器缓存
-        /// </summary>
-        private DefaultAssemblyResolver _assemblyResolver;
+        private static readonly ConcurrentDictionary<string, FileSnapshot> _fileSnapshots = new();
 
         /// <summary>
         /// 所有非动态生成程序集中的类型缓存（类型全名 -> TypeDefinition）
         /// 用于在 IL 修改时查找原类型引用，替代 Unity 端的 ProjectTypeCache
         /// </summary>
-        private readonly ConcurrentDictionary<string, TypeDefinition> _allTypesInNonDynamicGeneratedAssemblies = new();
+        private static readonly ConcurrentDictionary<string, TypeReference> _allTypesInNonDynamicGeneratedAssemblies = new();
 
         #endregion
-
-        public TypeInfoService(ILogger<TypeInfoService> logger, string projectPath)
-        {
-            _logger = logger;
-            _projectPath = projectPath;
-        }
 
         #region 公共接口
 
         /// <summary>
         /// 使用 AssemblyContext 初始化（从 Unity 传递过来）
         /// </summary>
-        public async Task Initialize(Dictionary<string, AssemblyContext> assemblyContexts, string[] preprocessorDefines)
+        public static async Task Initialize(Dictionary<string, AssemblyContext> assemblyContexts, string[] preprocessorDefines)
         {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            _assemblyContext = assemblyContexts;
+            
             // 清除之前的结果
             Clear();
 
@@ -92,88 +92,104 @@ namespace CompileServer.Services
             _assemblyResolver = new DefaultAssemblyResolver();
             _assemblyResolver.AddSearchDirectory(ReloadHelper.BaseDllPath);
 
-            // 收集所有唯一的引用程序集路径
-            var referencePaths = new HashSet<string>();
-            foreach (var context in assemblyContexts.Values)
-            {
-                // 收集所有引用程序集路径
-                foreach (var reference in context.References)
-                {
-                    if (string.IsNullOrEmpty(reference.Path) || !File.Exists(reference.Path))
-                        continue;
+            // 将所有程序集及其引用拷贝到BaseDLL目录，并更新上下文中的路径
+            CopyAssembliesToBaseDll();
 
-                    referencePaths.Add(reference.Path);
-                }
-            }
-
-            // 将所有引用程序集拷贝到BaseDLL目录
-            foreach (var referencePath in referencePaths)
-            {
-                try
-                {
-                    var referenceName = Path.GetFileNameWithoutExtension(referencePath);
-                    CopyAssemblyToBaseDll(referencePath, referenceName);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning($"拷贝引用程序集 {referencePath} 到 BaseDLL 目录时出错: {ex.Message}");
-                }
-            }
-
-            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-
-            // 并行构建所有程序集的编译和调用图
-            var tasks = new List<Task>();
             foreach (var context in assemblyContexts.Values)
             {
                 try
                 {
-                    // 先加载 AssemblyDefinition
                     if (string.IsNullOrEmpty(context.OutputPath) || !File.Exists(context.OutputPath))
-                        continue;
-
-                    // 将DLL和PDB文件拷贝到BaseDLL目录
-                    var baseDllPath = CopyAssemblyToBaseDll(context.OutputPath, context.Name);
-                    if (string.IsNullOrEmpty(baseDllPath))
                     {
-                        _logger.LogWarning($"无法拷贝程序集 {context.Name} 到 BaseDLL 目录");
+                        Console.WriteLine($"程序集 {context.Name} 的输出路径无效: {context.OutputPath}");
                         continue;
                     }
 
-                    tasks.Add(Task.Run(async () =>
+                    // 文件到程序集的映射缓存
+                    foreach (var sourceFile in context.SourceFiles)
                     {
-                        var assemblyDef = AssemblyDefinition.ReadAssembly(baseDllPath);
-                        
-                        await Task.WhenAll(
-                            BuildAssemblyCompilation(context),
-                            BuildMethodCallGraph(assemblyDef)
-                        );
+                        _fileToAssembly[sourceFile] = context.Name;
+                    }                    
 
-                        assemblyDef?.Dispose();
-                    }));
+                    var assemblyDef = AssemblyDefinition.ReadAssembly(context.OutputPath);
+
+                    await BuildMethodCallGraph(assemblyDef);
+
+                    assemblyDef?.Dispose();
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning($"处理程序集 {context.Name} 时出错: {ex.Message}");
+                    Console.WriteLine($"处理程序集 {context.Name} 时出错: {ex.Message}");
                 }
             }
 
-            await Task.WhenAll(tasks);
-
-            // 构建类型缓存（从所有已加载的 AssemblyDefinition 中收集类型）
-            BuildTypeCache();
-
             stopwatch.Stop();
-            _logger.LogInformation($"TypeInfo 初始化完成，耗时: {stopwatch.ElapsedMilliseconds}ms, " +
-                                   $"程序集数: {_assemblyCompilations.Count}, " +
-                                   $"方法调用关系数: {_methodCallGraph.Count}, " +
-                                   $"类型缓存数: {_allTypesInNonDynamicGeneratedAssemblies.Count}");
+            Console.WriteLine($"TypeInfo 初始化完成，耗时: {stopwatch.ElapsedMilliseconds}ms, " +
+                                   $"方法调用关系数: {_methodCallGraph.Count}, ");
+        }
+
+        /// <summary>
+        /// 获取或构建程序集的编译缓存
+        /// </summary>
+        public static async Task<CSharpCompilation> GetOrBuildCompilation(string assemblyName)
+        {
+            if (_assemblyCompilations.TryGetValue(assemblyName, out var compilation))
+            {
+                return compilation;
+            }
+
+            if (_assemblyContext == null || !_assemblyContext.TryGetValue(assemblyName, out var context))
+            {
+                return null;
+            }
+
+            var syntaxTreesBag = new ConcurrentBag<SyntaxTree>();
+            var parseTasks = context.SourceFiles.Select(sourceFile => Task.Run(() =>
+            {
+                if (File.Exists(sourceFile))
+                {
+                    var syntaxTree = GetOrCreateFileSnapshot(sourceFile)?.SyntaxTree;
+                    if (syntaxTree != null)
+                    {
+                        syntaxTreesBag.Add(syntaxTree);
+                    }
+                }
+            })).ToArray();
+
+            await Task.WhenAll(parseTasks);
+
+            var references = new List<MetadataReference>();
+            foreach (var reference in context.References)
+            {
+                if (!string.IsNullOrEmpty(reference.Path) && File.Exists(reference.Path))
+                {
+                    references.Add(MetadataReference.CreateFromFile(reference.Path));
+                }
+            }
+
+            compilation = CSharpCompilation.Create(
+                assemblyName: assemblyName,
+                syntaxTrees: syntaxTreesBag.ToList(),
+                references: references,
+                options: new CSharpCompilationOptions(
+                    OutputKind.DynamicallyLinkedLibrary,
+                    optimizationLevel: OptimizationLevel.Debug,
+                    allowUnsafe: context.AllowUnsafeCode,
+                    concurrentBuild: true,
+                    deterministic: false
+                )
+            );
+
+            _assemblyCompilations[assemblyName] = compilation;
+            AddAssemblyDefinition(assemblyName, AssemblyDefinition.ReadAssembly(_assemblyContext[assemblyName].OutputPath));
+
+            return compilation;
         }
 
         /// <summary>
         /// 根据文件路径获取所属的 Assembly 名称
         /// </summary>
-        public string GetAssemblyName(string filePath)
+        public static string GetAssemblyName(string filePath)
         {
             return _fileToAssembly.GetValueOrDefault(filePath);
         }
@@ -181,11 +197,11 @@ namespace CompileServer.Services
         /// <summary>
         /// 增量更新程序集（只更新改动的文件）
         /// </summary>
-        public void UpdateSyntaxTrees(string assemblyName, List<string> changedFiles)
+        public static async Task UpdateSyntaxTrees(string assemblyName, List<string> changedFiles)
         {
-            if (!_assemblyCompilations.TryGetValue(assemblyName, out var compilation))
+            var compilation = await GetOrBuildCompilation(assemblyName);
+            if (compilation == null)
             {
-                _logger.LogWarning($"找不到程序集 {assemblyName} 的编译缓存");
                 return;
             }
 
@@ -198,7 +214,7 @@ namespace CompileServer.Services
                 // 更新 CSharpCompilation 中的 SyntaxTree
                 if (newSyntaxTree != null)
                 {
-                    if (fileSnapshot.SyntaxTree != null)
+                    if (fileSnapshot.SyntaxTree != null && compilation.SyntaxTrees.Contains(fileSnapshot.SyntaxTree))
                     {
                         compilation = compilation.ReplaceSyntaxTree(fileSnapshot.SyntaxTree, newSyntaxTree);
                     }
@@ -210,6 +226,7 @@ namespace CompileServer.Services
                 }
 
                 fileSnapshot.SyntaxTree = newSyntaxTree;
+                _fileSnapshots[filePath] = fileSnapshot;
             }
 
             _assemblyCompilations[assemblyName] = compilation;
@@ -218,7 +235,7 @@ namespace CompileServer.Services
         /// <summary>
         /// 根据 DiffResults 更新方法调用图
         /// </summary>
-        public void UpdateMethodCallGraph(Dictionary<string, DiffResult> diffResults)
+        public static void UpdateMethodCallGraph(Dictionary<string, DiffResult> diffResults)
         {
             if (diffResults == null || diffResults.Count == 0)
                 return;
@@ -235,8 +252,7 @@ namespace CompileServer.Services
             {
                 foreach (var modifyMethod in modifyMethods)
                 {
-                    if (callers.ContainsKey(modifyMethod.MethodDefinition.FullName))
-                        callers.Remove(modifyMethod.MethodDefinition.FullName);
+                    callers.TryRemove(modifyMethod.MethodDefinition.FullName, out _);
                 }
             }
 
@@ -251,28 +267,56 @@ namespace CompileServer.Services
         /// <summary>
         /// 查找方法的调用者
         /// </summary>
-        public Dictionary<string, GenericMethodCallInfo> FindMethodCallers(string methodFullName)
+        public static Dictionary<string, GenericMethodCallInfo> FindMethodCallers(string methodFullName)
         {
             var callers = _methodCallGraph.GetValueOrDefault(methodFullName);
             return callers != null ? new Dictionary<string, GenericMethodCallInfo>(callers) : null;
         }
 
         /// <summary>
-        /// 获取原类型定义（从类型缓存中查找）
-        /// 替代 Unity 端的 ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies
+        /// 获取原类型定义
         /// </summary>
-        /// <param name="typeFullName">类型全名</param>
+        /// <param name="typeRef"></param>
         /// <returns>TypeDefinition，如果未找到则返回 null</returns>
-        public TypeDefinition GetOriginalTypeDefinition(string typeFullName)
+        public static TypeReference GetOriginalTypeDefinition(TypeReference typeRef)
         {
-            _allTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeFullName, out var typeDef);
-            return typeDef;
+            var assemblyName = typeRef.Scope.Name.Split("---")[0];
+            var typeFullName = typeRef.FullName;
+
+            if (_allTypesInNonDynamicGeneratedAssemblies.TryGetValue(typeFullName, out var originalTypeDef))
+            {
+                return originalTypeDef;
+            }
+
+            try
+            {
+                var context = _assemblyContext.GetValueOrDefault(assemblyName);
+                var assemblyDef = AssemblyDefinition.ReadAssembly(context.OutputPath);
+
+                var typeDef = assemblyDef.MainModule.GetType(typeFullName);
+                if (typeDef == null)
+                {
+                    throw new Exception($"类型 {typeFullName} 未在程序集 {assemblyName} 中找到");
+                }
+
+                _allTypesInNonDynamicGeneratedAssemblies[typeFullName] = typeDef;
+
+                assemblyDef.Dispose();
+                
+                return typeDef;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"查找类型 {assemblyName}:{typeFullName} 时出错: {ex.Message}");
+            }
+
+            return null;
         }
 
         /// <summary>
         /// 根据文件路径列表读取缓存的语法树并返回其中定义的类型
         /// </summary>
-        public HashSet<string> GetTypesFromFiles(IEnumerable<string> filePaths)
+        public static HashSet<string> GetTypesFromFiles(IEnumerable<string> filePaths)
         {
             var types = new HashSet<string>();
 
@@ -305,12 +349,12 @@ namespace CompileServer.Services
         /// <summary>
         /// 获取程序集的 AssemblyDefinition
         /// </summary>
-        public AssemblyDefinition GetAssemblyDefinition(string assemblyName)
+        public static AssemblyDefinition GetAssemblyDefinition(string assemblyName)
         {
             return _assemblyDefinitions.GetValueOrDefault(assemblyName);
         }
 
-        public void AddAssemblyDefinition(string assemblyName, AssemblyDefinition assemblyDef)
+        public static void AddAssemblyDefinition(string assemblyName, AssemblyDefinition assemblyDef)
         {
             // 如果已存在旧的 AssemblyDefinition，先释放它
             if (_assemblyDefinitions.TryGetValue(assemblyName, out var oldAssemblyDef))
@@ -322,7 +366,7 @@ namespace CompileServer.Services
             _assemblyDefinitions[assemblyName] = assemblyDef;
         }
 
-        public AssemblyDefinition CloneAssemblyDefinition(string assemblyName)
+        public static AssemblyDefinition CloneAssemblyDefinition(string assemblyName)
         {
             var sourceAssembly = GetAssemblyDefinition(assemblyName);
             if (sourceAssembly == null)
@@ -348,18 +392,22 @@ namespace CompileServer.Services
             };
 
             var assemblyDef = AssemblyDefinition.ReadAssembly(ms, readerParams);
+
+            var assemblyDefName = $"{assemblyDef.Name.Name}---{Guid.NewGuid()}";
+            assemblyDef.Name.Name = assemblyDefName;
+            assemblyDef.MainModule.Name = assemblyDefName;
+
             return assemblyDef;
         }
 
         /// <summary>
         /// 编译程序集并返回 AssemblyDefinition
         /// </summary>
-        public AssemblyDefinition Compile(string assemblyName, bool isModifyName = true)
+        public static async Task<AssemblyDefinition> Compile(string assemblyName)
         {
-            var compilation = _assemblyCompilations.GetValueOrDefault(assemblyName);
+            var compilation = await GetOrBuildCompilation(assemblyName);
             if (compilation == null)
             {
-                _logger.LogWarning($"找不到程序集 {assemblyName} 的编译缓存");
                 return null;
             }
 
@@ -382,12 +430,6 @@ namespace CompileServer.Services
                 };
 
                 var assemblyDef = AssemblyDefinition.ReadAssembly(ms, readerParams);
-                if (isModifyName)
-                {
-                    var assemblyDefName = $"{assemblyName}_{Guid.NewGuid()}";
-                    assemblyDef.Name.Name = assemblyDefName;
-                    assemblyDef.MainModule.Name = assemblyDefName;
-                }
 
                 return assemblyDef;
             }
@@ -450,7 +492,7 @@ namespace CompileServer.Services
         /// <summary>
         /// 清除所有缓存和状态
         /// </summary>
-        private void Clear()
+        private static void Clear()
         {
             // 释放AssemblyDefinition资源
             foreach (var assemblyDef in _assemblyDefinitions.Values)
@@ -469,7 +511,41 @@ namespace CompileServer.Services
             // 清除ReloadHelper的缓存和临时文件
             ReloadHelper.Clear();
             
-            _logger.LogDebug("已清除所有缓存和临时文件");
+            Console.WriteLine("已清除所有缓存和临时文件");
+        }
+
+        /// <summary>
+        /// 将所有程序集及其引用拷贝到BaseDLL目录，并更新 _assemblyContext 中的路径
+        /// </summary>
+        private static void CopyAssembliesToBaseDll()
+        {
+            if (_assemblyContext == null) return;
+
+            foreach (var context in _assemblyContext.Values)
+            {
+                // 1. 拷贝并更新所有引用程序集路径
+                foreach (var reference in context.References)
+                {
+                    if (string.IsNullOrEmpty(reference.Path) || !File.Exists(reference.Path))
+                        continue;
+
+                    var targetPath = CopyAssemblyToBaseDll(reference.Path, Path.GetFileNameWithoutExtension(reference.Path));
+                    if (!string.IsNullOrEmpty(targetPath))
+                    {
+                        reference.Path = targetPath;
+                    }
+                }
+
+                // 2. 拷贝并更新主程序集自身路径
+                if (!string.IsNullOrEmpty(context.OutputPath) && File.Exists(context.OutputPath))
+                {
+                    var targetOutputPath = CopyAssemblyToBaseDll(context.OutputPath, context.Name);
+                    if (!string.IsNullOrEmpty(targetOutputPath))
+                    {
+                        context.OutputPath = targetOutputPath;
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -478,7 +554,7 @@ namespace CompileServer.Services
         /// <param name="originalAssemblyPath">原始程序集路径</param>
         /// <param name="assemblyName">程序集名称</param>
         /// <returns>拷贝后的程序集路径，如果失败则返回null</returns>
-        private string CopyAssemblyToBaseDll(string originalAssemblyPath, string assemblyName)
+        private static string CopyAssemblyToBaseDll(string originalAssemblyPath, string assemblyName)
         {
             try
             {
@@ -511,19 +587,19 @@ namespace CompileServer.Services
                         File.Copy(pdbPath, targetPdbPath, overwrite: true);
                     }
 
-                    _logger.LogDebug($"已拷贝程序集 {assemblyName} 到 BaseDLL 目录: {targetDllPath}");
+                    Console.WriteLine($"已拷贝程序集 {assemblyName} 到 BaseDLL 目录: {targetDllPath}");
                 }
 
                 return targetDllPath;
             }
             catch (Exception ex)
             {
-                _logger.LogError($"拷贝程序集 {assemblyName} 到 BaseDLL 目录时出错: {ex.Message}");
+                Console.WriteLine($"拷贝程序集 {assemblyName} 到 BaseDLL 目录时出错: {ex.Message}");
                 return null;
             }
         }
 
-        private SyntaxTree GetSyntaxTree(string filePath)
+        private static SyntaxTree GetSyntaxTree(string filePath)
         {
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
                 return null;
@@ -535,7 +611,7 @@ namespace CompileServer.Services
             return CSharpSyntaxTree.ParseText(content, _parseOptions, path: filePath, encoding: Encoding.UTF8);
         }
 
-        private FileSnapshot GetOrCreateFileSnapshot(string filePath)
+        private static FileSnapshot GetOrCreateFileSnapshot(string filePath)
         {
             if (!_fileSnapshots.TryGetValue(filePath, out var fileSnapshot))
             {
@@ -554,92 +630,27 @@ namespace CompileServer.Services
         }
 
         /// <summary>
-        /// 为程序集构建 CSharpCompilation 并缓存
+        /// 使用 Mono.Cecil 构建方法调用图
         /// </summary>
-        private async Task BuildAssemblyCompilation(AssemblyContext assemblyContext)
+        private static async Task BuildMethodCallGraph(AssemblyDefinition assemblyDef)
         {
-            var syntaxTrees = new ConcurrentBag<SyntaxTree>();
-
             var tasks = new List<Task>();
-            foreach (var sourceFile in assemblyContext.SourceFiles)
+            foreach (var type in assemblyDef.MainModule.Types)
             {
                 tasks.Add(Task.Run(() =>
                 {
-                    var fullPath = Path.IsPathRooted(sourceFile)
-                        ? sourceFile
-                        : Path.GetFullPath(Path.Combine(_projectPath, sourceFile));
-
-                    if (!File.Exists(fullPath))
-                        return;
-
-                    var syntaxTree = GetOrCreateFileSnapshot(fullPath)?.SyntaxTree;
-                    if (syntaxTree != null)
+                    foreach (var method in type.Methods)
                     {
-                        syntaxTrees.Add(syntaxTree);
-                        _fileToAssembly[fullPath] = assemblyContext.Name;
+                        AnalyzeMethodForMethodCalls(method);
                     }
                 }));
             }
 
             await Task.WhenAll(tasks);
-
-            var syntaxTreesList = syntaxTrees.ToList();
-            if (syntaxTreesList.Count == 0)
-                return;
-
-            // 构建引用
-            var references = new List<MetadataReference>();
-            foreach (var reference in assemblyContext.References)
-            {
-                if (!string.IsNullOrEmpty(reference.Path) && File.Exists(reference.Path))
-                {
-                    references.Add(MetadataReference.CreateFromFile(reference.Path));
-                }
-            }
-
-            // 创建 CSharpCompilation
-            var compilation = CSharpCompilation.Create(
-                assemblyName: assemblyContext.Name,
-                syntaxTrees: syntaxTreesList,
-                references: references,
-                options: new CSharpCompilationOptions(
-                    OutputKind.DynamicallyLinkedLibrary,
-                    optimizationLevel: OptimizationLevel.Debug,
-                    allowUnsafe: assemblyContext.AllowUnsafeCode,
-                    concurrentBuild: true,
-                    deterministic: false
-                )
-            );
-
-            _assemblyCompilations[assemblyContext.Name] = compilation;
-            
-            var assemblyDef = Compile(assemblyContext.Name, false);
-            AddAssemblyDefinition(assemblyContext.Name, assemblyDef);
         }
 
-        /// <summary>
-        /// 使用 Mono.Cecil 构建方法调用图
-        /// </summary>
-        private async Task BuildMethodCallGraph(AssemblyDefinition assemblyDef)
-        {
-            var tasks = new List<Task>();
-            foreach (var type in assemblyDef.MainModule.Types)
-            {
-                tasks.Add(Task.Run(() => AnalyzeTypeForMethodCalls(type)));
-            }
-
-            await Task.WhenAll(tasks);
-        }
-
-        private void AnalyzeTypeForMethodCalls(TypeDefinition type)
-        {
-            foreach (var method in type.Methods)
-            {
-                AnalyzeMethodForMethodCalls(method);
-            }
-        }
-
-        private void AnalyzeMethodForMethodCalls(MethodDefinition methodDef)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void AnalyzeMethodForMethodCalls(MethodDefinition methodDef)
         {
             if (!methodDef.HasBody)
                 return;
@@ -664,58 +675,15 @@ namespace CompileServer.Services
 
                         if (!_methodCallGraph.TryGetValue(calledMethodName, out var callers))
                         {
-                            callers = new Dictionary<string, GenericMethodCallInfo>();
+                            callers = new ConcurrentDictionary<string, GenericMethodCallInfo>();
                             _methodCallGraph[calledMethodName] = callers;
                         }
 
                         if (!callers.ContainsKey(methodDef.FullName))
                         {
-                            callers.Add(methodDef.FullName, new GenericMethodCallInfo(methodDef));
+                            callers.TryAdd(methodDef.FullName, new GenericMethodCallInfo(methodDef));
                         }
                     }
-                }
-            }
-        }
-
-        /// <summary>
-        /// 构建类型缓存：从所有已加载的 AssemblyDefinition 中收集类型
-        /// 替代 Unity 端的 ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies
-        /// </summary>
-        private void BuildTypeCache()
-        {
-            foreach (var assemblyDef in _assemblyDefinitions.Values)
-            {
-                if (assemblyDef == null || assemblyDef.MainModule == null)
-                    continue;
-
-                // 遍历程序集中的所有类型（包括嵌套类型）
-                CollectTypesFromAssembly(assemblyDef.MainModule.Types);
-            }
-        }
-
-        /// <summary>
-        /// 递归收集类型（包括嵌套类型）
-        /// </summary>
-        private void CollectTypesFromAssembly(Collection<TypeDefinition> types)
-        {
-            foreach (var typeDef in types)
-            {
-                // 跳过编译器生成的类型
-                if (IsCompilerGeneratedType(typeDef))
-                    continue;
-
-                var typeFullName = typeDef.FullName;
-
-                // 如果已存在，跳过（保留第一个）
-                if (!_allTypesInNonDynamicGeneratedAssemblies.ContainsKey(typeFullName))
-                {
-                    _allTypesInNonDynamicGeneratedAssemblies[typeFullName] = typeDef;
-                }
-
-                // 递归处理嵌套类型
-                if (typeDef.HasNestedTypes)
-                {
-                    CollectTypesFromAssembly(typeDef.NestedTypes);
                 }
             }
         }
