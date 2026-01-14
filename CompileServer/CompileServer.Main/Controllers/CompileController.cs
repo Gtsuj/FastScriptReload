@@ -190,115 +190,125 @@ namespace CompileServer.Controllers
                     });
                 }
 
-                // 2. 根据文件路径自动确定程序集（从初始化缓存中查找）
-                // 根据第一个文件确定程序集（同一批文件应该属于同一程序集）
-                string assemblyName = TypeInfoHelper.GetAssemblyName(changedFiles[0]);
-                if (string.IsNullOrEmpty(assemblyName))
-                {
-                    _logger.LogWarning($"无法确定文件 '{changedFiles[0]}' 所属的程序集");
-                    return await Task.FromResult(new CompileResponse
-                    {
-                        Success = false,
-                        ErrorMessage = $"无法确定文件所属的程序集，请确保已调用 /api/initialize 初始化",
-                        ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
-                        IsFromCache = false
-                    });
-                }
-                
-                // 验证所有文件是否属于同一程序集
-                foreach (var file in changedFiles.Skip(1))
-                {
-                    var fileAssemblyName = TypeInfoHelper.GetAssemblyName(file);
-                    if (!string.IsNullOrEmpty(fileAssemblyName) && fileAssemblyName != assemblyName)
-                    {
-                        _logger.LogWarning($"文件 '{file}' 属于程序集 '{fileAssemblyName}'，与第一个文件 '{changedFiles[0]}' 的程序集 '{assemblyName}' 不一致");
-                    }
-                }
+                // 2. 根据文件路径自动确定程序集并分组
+                var filesByAssembly = new Dictionary<string, List<string>>();
+                var unknownFiles = new List<string>();
 
-                _logger.LogInformation($"Compile request received for assembly: {assemblyName}, {changedFiles.Count} changed files");
-
-                // 3. 调用 CompileAndDiff 进行编译和差异分析
-                var diffResults = await _compileDiffService.CompileAndDiff(assemblyName, changedFiles);
-                
-                if (diffResults == null || diffResults.Count == 0)
+                foreach (var file in changedFiles)
                 {
-                    _logger.LogWarning($"No differences found for assembly: {assemblyName}");
-                    return await Task.FromResult(new CompileResponse
+                    string assemblyName = TypeInfoHelper.GetAssemblyName(file);
+                    if (string.IsNullOrEmpty(assemblyName))
                     {
-                        Success = true,
-                        HookTypeInfos = new Dictionary<string, HookTypeInfo>(),
-                        ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
-                        IsFromCache = false
-                    });
-                }
-
-                stopwatch.Stop();
-                _logger.LogInformation($"Compile and diff completed in {stopwatch.ElapsedMilliseconds}ms, found {diffResults.Count} changed types");
-
-                // 4. 调用 IL 修改服务生成 Wrapper 程序集
-                try
-                {
-                    var wrapperPath = _ilModifyService.ModifyCompileAssembly(assemblyName, diffResults);
-                    _logger.LogInformation($"Wrapper assembly generated: {wrapperPath}");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to generate wrapper assembly");
-                    return await Task.FromResult(new CompileResponse
-                    {
-                        Success = false,
-                        ErrorMessage = $"IL modification failed: {ex.Message}",
-                        ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
-                        IsFromCache = false
-                    });
-                }
-
-                // 4. 从 DiffResult 中提取本次编译涉及的具体方法和字段信息
-                var hookTypeInfos = new Dictionary<string, HookTypeInfo>();
-                foreach (var (typeFullName, diffResult) in diffResults)
-                {
-                    // 从全局缓存中获取完整的 HookTypeInfo（ILModifyService 已更新）
-                    if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeFullName, out var cachedHookTypeInfo))
-                    {
+                        unknownFiles.Add(file);
                         continue;
                     }
 
-                    // 创建新的 HookTypeInfo，只包含本次编译改动的方法和字段
-                    var hookTypeInfo = new HookTypeInfo
+                    if (!filesByAssembly.TryGetValue(assemblyName, out var files))
                     {
-                        TypeFullName = cachedHookTypeInfo.TypeFullName,
-                        AssemblyName = cachedHookTypeInfo.AssemblyName
-                    };
-
-                    // 从 DiffResult 中提取本次改动的方法
-                    foreach (var (methodFullName, methodDiffInfo) in diffResult.ModifiedMethods)
-                    {
-                        if (cachedHookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var hookMethodInfo))
-                        {
-                            hookTypeInfo.ModifiedMethods[methodFullName] = hookMethodInfo;
-                        }
+                        files = new List<string>();
+                        filesByAssembly[assemblyName] = files;
                     }
+                    files.Add(file);
+                }
 
-                    // 从 DiffResult 中提取本次新增的字段
-                    foreach (var (fieldFullName, _) in diffResult.AddedFields)
+                if (unknownFiles.Count > 0)
+                {
+                    _logger.LogWarning($"有 {unknownFiles.Count} 个文件无法确定所属程序集: {string.Join(", ", unknownFiles)}");
+                    if (filesByAssembly.Count == 0)
                     {
-                        if (cachedHookTypeInfo.AddedFields.TryGetValue(fieldFullName, out var hookFieldInfo))
+                        return await Task.FromResult(new CompileResponse
                         {
-                            hookTypeInfo.AddedFields.TryAdd(fieldFullName, hookFieldInfo);
-                        }
-                    }
-
-                    // 只有当有实际改动时才添加到结果中
-                    if (hookTypeInfo.ModifiedMethods.Count > 0 || hookTypeInfo.AddedFields.Count > 0)
-                    {
-                        hookTypeInfos[typeFullName] = hookTypeInfo;
+                            Success = false,
+                            ErrorMessage = $"无法确定任何文件所属的程序集，请确保已调用 /api/initialize 初始化. 未知文件: {string.Join(", ", unknownFiles.Take(3))}...",
+                            ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                            IsFromCache = false
+                        });
                     }
                 }
 
+                var allHookTypeInfos = new Dictionary<string, HookTypeInfo>();
+
+                foreach (var entry in filesByAssembly)
+                {
+                    string assemblyName = entry.Key;
+                    List<string> filesInAssembly = entry.Value;
+
+                    _logger.LogInformation($"Processing compile request for assembly: {assemblyName}, {filesInAssembly.Count} changed files");
+
+                    // 3. 调用 CompileAndDiff 进行编译和差异分析
+                    var diffResults = await _compileDiffService.CompileAndDiff(assemblyName, filesInAssembly);
+                    
+                    if (diffResults == null || diffResults.Count == 0)
+                    {
+                        _logger.LogInformation($"No differences found for assembly: {assemblyName}");
+                        continue;
+                    }
+
+                    // 4. 调用 IL 修改服务生成 Wrapper 程序集
+                    try
+                    {
+                        var wrapperPath = _ilModifyService.ModifyCompileAssembly(assemblyName, diffResults);
+                        _logger.LogInformation($"Wrapper assembly generated for {assemblyName}: {wrapperPath}");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, $"Failed to generate wrapper assembly for {assemblyName}");
+                        return await Task.FromResult(new CompileResponse
+                        {
+                            Success = false,
+                            ErrorMessage = $"IL modification failed for {assemblyName}: {ex.Message}",
+                            ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                            IsFromCache = false
+                        });
+                    }
+
+                    // 5. 从 DiffResult 中提取本次编译涉及的具体方法和字段信息
+                    foreach (var (typeFullName, diffResult) in diffResults)
+                    {
+                        // 从全局缓存中获取完整的 HookTypeInfo（ILModifyService 已更新）
+                        if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeFullName, out var cachedHookTypeInfo))
+                        {
+                            continue;
+                        }
+
+                        // 创建新的 HookTypeInfo，只包含本次编译改动的方法和字段
+                        var hookTypeInfo = new HookTypeInfo
+                        {
+                            TypeFullName = cachedHookTypeInfo.TypeFullName,
+                            AssemblyName = cachedHookTypeInfo.AssemblyName
+                        };
+
+                        // 从 DiffResult 中提取本次改动的方法
+                        foreach (var (methodFullName, methodDiffInfo) in diffResult.ModifiedMethods)
+                        {
+                            if (cachedHookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var hookMethodInfo))
+                            {
+                                hookTypeInfo.ModifiedMethods[methodFullName] = hookMethodInfo;
+                            }
+                        }
+
+                        // 从 DiffResult 中提取本次新增的字段
+                        foreach (var (fieldFullName, _) in diffResult.AddedFields)
+                        {
+                            if (cachedHookTypeInfo.AddedFields.TryGetValue(fieldFullName, out var hookFieldInfo))
+                            {
+                                hookTypeInfo.AddedFields.TryAdd(fieldFullName, hookFieldInfo);
+                            }
+                        }
+
+                        // 只有当有实际改动时才添加到结果中
+                        if (hookTypeInfo.ModifiedMethods.Count > 0 || hookTypeInfo.AddedFields.Count > 0)
+                        {
+                            allHookTypeInfos[typeFullName] = hookTypeInfo;
+                        }
+                    }
+                }
+
+                stopwatch.Stop();
                 return await Task.FromResult(new CompileResponse
                 {
                     Success = true,
-                    HookTypeInfos = hookTypeInfos,
+                    HookTypeInfos = allHookTypeInfos,
                     ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
                     IsFromCache = false
                 });
