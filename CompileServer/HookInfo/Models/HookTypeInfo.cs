@@ -26,9 +26,9 @@ namespace HookInfo.Models
         public Dictionary<string, HookMethodInfo> ModifiedMethods = new();
 
         /// <summary>
-        /// 新增的字段信息
+        /// 修改的字段列表
         /// </summary>
-        public Dictionary<string, HookFieldInfo> AddedFields { get; } = new();
+        public Dictionary<string, HookFieldInfo> ModifiedFields { get; } = new();
 
         public void AddOrModifyMethod(string fullName, MethodDefinition methodDef, MemberModifyState hookMethodState)
         {

@@ -93,7 +93,7 @@ namespace CompileServer.Services
                 {
                     if (diffResult.AddedFields.ContainsKey(fieldDef.FullName))
                     {
-                        hookTypeInfo.AddedFields.TryAdd(fieldDef.FullName, new HookFieldInfo(fieldDef));
+                        hookTypeInfo.ModifiedFields.TryAdd(fieldDef.FullName, new HookFieldInfo(fieldDef));
                     }
                 }
 
@@ -253,53 +253,79 @@ namespace CompileServer.Services
             // 统一清理程序集
             foreach (var typeDef in mainModule.Types.ToArray())
             {
-                // 删除没有Hook的类型
-                if (!diffResults.TryGetValue(typeDef.FullName, out var result))
+                ClearType(diffResults, typeDef, mainModule);
+            }
+        }
+
+        private static void ClearType(Dictionary<string, DiffResult> diffResults, TypeDefinition typeDef, ModuleDefinition mainModule)
+        {
+            // 删除没有Hook的类型
+            if (!diffResults.TryGetValue(typeDef.FullName, out var result))
+            {
+                bool inNestedType = false;
+                // 处理只修改嵌套类但是父类没被修改得情况
+                foreach (var nestedType in typeDef.NestedTypes)
                 {
-                    mainModule.Types.Remove(typeDef);
-                    continue;
+                    if (diffResults.ContainsKey(nestedType.FullName))
+                    {
+                        inNestedType = true;
+                        ClearType(diffResults, nestedType, mainModule);
+                        break;
+                    }
                 }
 
-                // 清理方法（从全局缓存中获取）
-                if (ReloadHelper.HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
+                if (!inNestedType)
                 {
-                    typeDef.Methods.Clear();
-                    foreach (var (methodFullName, _) in result.ModifiedMethods)
+                    mainModule.Types.Remove(typeDef);
+                    return;
+                }
+
+                typeDef.Methods.Clear();
+                typeDef.Fields.Clear();
+                typeDef.Properties.Clear();
+                typeDef.Events.Clear();
+                return;
+            }
+                
+            // 清理方法（从全局缓存中获取）
+            if (ReloadHelper.HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
+            {
+                typeDef.Methods.Clear();
+                foreach (var (methodFullName, _) in result.ModifiedMethods)
+                {
+                    if (hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var modifiedMethod))
                     {
-                        if (hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var modifiedMethod))
+                        // 直接使用 WrapperMethodDef，与原始逻辑一致
+                        if (modifiedMethod.WrapperMethodDef != null)
                         {
-                            // 直接使用 WrapperMethodDef，与原始逻辑一致
-                            if (modifiedMethod.WrapperMethodDef != null)
-                            {
-                                typeDef.Methods.Add(modifiedMethod.WrapperMethodDef);
-                            }
+                            typeDef.Methods.Add(modifiedMethod.WrapperMethodDef);
                         }
                     }
                 }
-
-                // 清理字段
-                for (int i = typeDef.Fields.Count - 1; i >= 0; i--)
-                {
-                    var fieldDef = typeDef.Fields[i];
-                    if (!result.AddedFields.ContainsKey(fieldDef.FullName))
-                    {
-                        typeDef.Fields.RemoveAt(i);
-                    }
-                }
-
-                // 清理内部类
-                for (int i = typeDef.NestedTypes.Count - 1; i >= 0; i--)
-                {
-                    var nestedType = typeDef.NestedTypes[i];
-                    if (!NestedTypeInfo.NestedTypeInfos.ContainsKey(nestedType.FullName))
-                    {
-                        typeDef.NestedTypes.RemoveAt(i);
-                    }
-                }
-
-                typeDef.Properties.Clear();
-                typeDef.Events.Clear();
             }
+
+            // 清理字段
+            for (int i = typeDef.Fields.Count - 1; i >= 0; i--)
+            {
+                var fieldDef = typeDef.Fields[i];
+                if (!result.AddedFields.ContainsKey(fieldDef.FullName))
+                {
+                    typeDef.Fields.RemoveAt(i);
+                }
+            }
+
+            // 清理内部类
+            for (int i = typeDef.NestedTypes.Count - 1; i >= 0; i--)
+            {
+                var nestedType = typeDef.NestedTypes[i];
+                if (!NestedTypeInfo.NestedTypeInfos.ContainsKey(nestedType.FullName))
+                {
+                    typeDef.NestedTypes.RemoveAt(i);
+                }
+            }
+
+            typeDef.Properties.Clear();
+            typeDef.Events.Clear();
         }
 
         /// <summary>
@@ -328,7 +354,7 @@ namespace CompileServer.Services
 
                 foreach (var (_, fieldInfo) in diffResult.AddedFields)
                 {
-                    if (hookTypeInfo.AddedFields.TryGetValue(fieldInfo.FullName, out var addedFieldInfo))
+                    if (hookTypeInfo.ModifiedFields.TryGetValue(fieldInfo.FullName, out var addedFieldInfo))
                     {
                         addedFieldInfo.AssemblyPath = assemblyPath;
                     }
@@ -551,7 +577,7 @@ namespace CompileServer.Services
 
             // 处理新增字段的访问（从全局缓存中获取）
             if (ReloadHelper.HookTypeInfoCache.TryGetValue(fieldRef.DeclaringType.FullName, out var hookTypeInfo)
-                && hookTypeInfo.AddedFields.ContainsKey(fieldRef.FullName))
+                && hookTypeInfo.ModifiedFields.ContainsKey(fieldRef.FullName))
             {
                 var code = inst.OpCode.Code;
                 switch (code)

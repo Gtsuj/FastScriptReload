@@ -287,17 +287,17 @@ namespace CompileServer.Controllers
                             }
                         }
 
-                        // 从 DiffResult 中提取本次新增的字段
+                        // 从 DiffResult 中提取本次改动的字段
                         foreach (var (fieldFullName, _) in diffResult.AddedFields)
                         {
-                            if (cachedHookTypeInfo.AddedFields.TryGetValue(fieldFullName, out var hookFieldInfo))
+                            if (cachedHookTypeInfo.ModifiedFields.TryGetValue(fieldFullName, out var hookFieldInfo))
                             {
-                                hookTypeInfo.AddedFields.TryAdd(fieldFullName, hookFieldInfo);
+                                hookTypeInfo.ModifiedFields.TryAdd(fieldFullName, hookFieldInfo);
                             }
                         }
 
                         // 只有当有实际改动时才添加到结果中
-                        if (hookTypeInfo.ModifiedMethods.Count > 0 || hookTypeInfo.AddedFields.Count > 0)
+                        if (hookTypeInfo.ModifiedMethods.Count > 0 || hookTypeInfo.ModifiedFields.Count > 0)
                         {
                             allHookTypeInfos[typeFullName] = hookTypeInfo;
                         }

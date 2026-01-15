@@ -76,11 +76,21 @@ public class HookMethodInfo : IHookMemberInfo
         {
             return;
         }
-    
-        AssemblyDefinition assemblyDefinition = AssemblyDefinition.ReadAssembly(AssemblyPath);
+
+        using var assemblyDefinition = AssemblyDefinition.ReadAssembly(AssemblyPath);
+        if (string.IsNullOrEmpty(TypeFullName) || string.IsNullOrEmpty(WrapperMethodName))
+        {
+            return;
+        }
+
         var typeDef = assemblyDefinition.MainModule.GetType(TypeFullName);
+        if (typeDef == null)
+        {
+            return;
+        }
+
         WrapperMethodDef = typeDef.Methods.FirstOrDefault(m => m.FullName == WrapperMethodName);
-    
+
         if (HistoricalHookedAssemblyPaths.Count > 1)
         {
             HistoricalHookedAssemblyPaths.RemoveAt(HistoricalHookedAssemblyPaths.Count - 1);
@@ -89,12 +99,13 @@ public class HookMethodInfo : IHookMemberInfo
                 var hookedAssemblyPath = HistoricalHookedAssemblyPaths[i];
                 var assembly = Assembly.LoadFrom(hookedAssemblyPath);
                 var type = assembly.GetType(TypeFullName);
-                var method = type.GetMethodByMethodDefName(WrapperMethodName);
-                HistoricalHookedMethods.Add(method);
+                var method = type?.GetMethodByMethodDefName(WrapperMethodName);
+                if (method != null)
+                {
+                    HistoricalHookedMethods.Add(method);
+                }
             }
         }
-    
-        assemblyDefinition.Dispose();
     }
 
     public void AddHistoricalHookedMethod(MethodBase methodBase)

@@ -453,9 +453,9 @@ namespace CompileServer.Helper
         {
             return (methodRef.DeclaringType.Name.Contains("AsyncTaskMethodBuilder")
                     || methodRef.DeclaringType.Name.Contains("AsyncVoidMethodBuilder")
-                    || methodRef.DeclaringType.Name.Contains("AsyncValueTaskMethodBuilder"))
+                    || methodRef.DeclaringType.Name.Contains("AsyncValueTaskMethodBuilder")
                     || methodRef.DeclaringType.Name.Contains("AsyncUniTaskMethodBuilder")
-                    || methodRef.DeclaringType.Name.Contains("AsyncUniTaskVoidMethodBuilder")
+                    || methodRef.DeclaringType.Name.Contains("AsyncUniTaskVoidMethodBuilder"))
                    && methodRef.Name.Equals("Start");
         }
 
@@ -723,7 +723,7 @@ namespace CompileServer.Helper
 
             if (string.IsNullOrEmpty(namespaceName))
             {
-                return string.Join(".", parts);
+                return string.Join("/", parts);
             }
 
             var builder = new StringBuilder(namespaceName.Length + parts.Count * 20);

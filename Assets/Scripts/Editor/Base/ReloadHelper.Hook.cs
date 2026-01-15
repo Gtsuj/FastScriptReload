@@ -30,7 +30,7 @@ namespace FastScriptReload.Editor
 
         private static void HookField(HookTypeInfo hookTypeInfo)
         {
-            foreach (var (name, fieldInfo) in hookTypeInfo.AddedFields)
+            foreach (var (name, fieldInfo) in hookTypeInfo.ModifiedFields)
             {
                 FastScriptReloadHookDetailsWindow.NotifyMemberHooked(name, true);
             }
@@ -41,6 +41,14 @@ namespace FastScriptReload.Editor
             var typeFullName = hookTypeInfo.TypeFullName;
             var originType = Type.GetType($"{typeFullName},{hookTypeInfo.AssemblyName}");
 
+            if (originType == null)
+            {
+                var errorMsg = $"找不到要Hook的原类型查找: {typeFullName},{hookTypeInfo.AssemblyName}";
+                LoggerScoped.LogError(errorMsg);
+                FastScriptReloadHookDetailsWindow.NotifyHookFailed(errorMsg);
+                return;
+            }
+            
             foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
             {
                 if (modifiedMethod.HasGenericParameters)
@@ -52,7 +60,7 @@ namespace FastScriptReload.Editor
                 var wrapperAssembly = Assembly.LoadFrom(modifiedMethod.AssemblyPath);
 
                 // 从 Wrapper 程序集中找到对应的类型
-                Type wrapperType = wrapperAssembly.GetType(typeFullName);
+                Type wrapperType = wrapperAssembly.GetType(originType.FullName);
                 if (wrapperType == null)
                 {
                     var errorMsg = $"在 Wrapper 程序集中找不到类型: {typeFullName}";

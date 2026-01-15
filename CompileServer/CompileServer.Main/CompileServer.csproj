@@ -48,6 +48,9 @@
             <RuntimeFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)$(TargetName).dll" />
         </ItemGroup>
         <Copy SourceFiles="@(RuntimeFiles)" DestinationFolder="$(UnityPluginPath)" />
+        <!-- 复制 HookInfo 与 HookInfo.Runtime 的 PDB（用于调试） -->
+        <Copy SourceFiles="$(TargetDir)HookInfo.pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)HookInfo.pdb')" />
+        <Copy SourceFiles="$(TargetDir)HookInfo.Runtime.pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)HookInfo.Runtime.pdb')" />
         <Message Text="✅ Copied CompileServer to Unity: $(UnityPluginPath)" Importance="high" />
     </Target>
 
