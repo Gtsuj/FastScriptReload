@@ -222,7 +222,7 @@ namespace CompileServer.Services
 
                     hookMethodInfo.WrapperMethodName = methodDef.FullName;
                 }
-            }            
+            }
         }
 
         /// <summary>
@@ -411,6 +411,35 @@ namespace CompileServer.Services
             {
                 HandleInstruction(processor, instructions[i], moduleDef);
             }
+
+            // 处理调试信息中的类型引用
+            HandleImportScope(methodDef?.DebugInformation?.Scope?.Import, moduleDef);
+        }
+
+        /// <summary>
+        /// 处理调试信息中的类型引用
+        /// </summary>
+        private void HandleImportScope(ImportDebugInformation import, ModuleDefinition moduleDef)
+        {
+            if (import == null)
+            {
+                return;
+            }
+
+            if (import.Parent != null)
+            {
+                HandleImportScope(import.Parent, moduleDef);
+            }
+
+            if (!import.HasTargets)
+            {
+                return;
+            }
+
+            foreach (var importTarget in import.Targets)
+            {
+                importTarget.Type = GetOriginalType(importTarget.Type, moduleDef);
+            }
         }
 
         /// <summary>
@@ -450,11 +479,11 @@ namespace CompileServer.Services
 
                 if (hookTypeInfo.ModifiedMethods.TryGetValue(methodName, out var methodInfo))
                 {
-                    if(methodRef is GenericInstanceMethod genericInstance)
+                    if (methodRef is GenericInstanceMethod genericInstance)
                     {
                         return CreateGenericInstanceMethod(methodInfo.WrapperMethodDef, genericInstance.GenericArguments, module);
                     }
-                    
+
                     if (methodInfo.MemberModifyState == MemberModifyState.Added)
                     {
                         return module.ImportReference(methodInfo.WrapperMethodDef);

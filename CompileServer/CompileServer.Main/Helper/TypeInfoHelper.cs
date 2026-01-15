@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -30,7 +31,7 @@ namespace CompileServer.Helper
         private static CSharpParseOptions _parseOptions;
 
         private static Dictionary<string, AssemblyContext> _assemblyContext;
-        
+
         /// <summary>
         /// Assembly 解析器缓存
         /// </summary>
@@ -79,7 +80,7 @@ namespace CompileServer.Helper
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
             _assemblyContext = assemblyContexts;
-            
+
             // 清除之前的结果
             Clear();
 
@@ -109,7 +110,7 @@ namespace CompileServer.Helper
                     foreach (var sourceFile in context.SourceFiles)
                     {
                         _fileToAssembly[sourceFile] = context.Name;
-                    }                    
+                    }
 
                     var assemblyDef = AssemblyDefinition.ReadAssembly(context.OutputPath);
 
@@ -176,7 +177,7 @@ namespace CompileServer.Helper
                     optimizationLevel: OptimizationLevel.Debug,
                     allowUnsafe: context.AllowUnsafeCode,
                     concurrentBuild: true,
-                    deterministic: false
+                    deterministic: true
                 )
             );
 
@@ -302,7 +303,7 @@ namespace CompileServer.Helper
                 _allTypesInNonDynamicGeneratedAssemblies[typeFullName] = typeDef;
 
                 assemblyDef.Dispose();
-                
+
                 return typeDef;
             }
             catch (Exception ex)
@@ -361,7 +362,7 @@ namespace CompileServer.Helper
             {
                 oldAssemblyDef?.Dispose();
             }
-            
+
             // 保存最新的 AssemblyDefinition
             _assemblyDefinitions[assemblyName] = assemblyDef;
         }
@@ -411,9 +412,13 @@ namespace CompileServer.Helper
                 return null;
             }
 
+            var stopwatch = Stopwatch.StartNew();
+            
             var ms = new MemoryStream();
             var pdbMs = new MemoryStream();
             var emitResult = compilation.Emit(ms, pdbMs, options: EMIT_OPTIONS);
+            
+            Console.WriteLine("编译耗时：" + stopwatch.ElapsedMilliseconds + "ms");
 
             if (emitResult.Success)
             {
@@ -446,8 +451,11 @@ namespace CompileServer.Helper
         /// </summary>
         public static bool IsTaskCallStartMethod(MethodReference methodRef)
         {
-            return (methodRef.DeclaringType.FullName.Contains("System.Runtime.CompilerServices.AsyncTaskMethodBuilder")
-                    || methodRef.DeclaringType.FullName.Contains("Cysharp.Threading.Tasks.CompilerServices.AsyncUniTaskMethodBuilder"))
+            return (methodRef.DeclaringType.Name.Contains("AsyncTaskMethodBuilder")
+                    || methodRef.DeclaringType.Name.Contains("AsyncVoidMethodBuilder")
+                    || methodRef.DeclaringType.Name.Contains("AsyncValueTaskMethodBuilder"))
+                    || methodRef.DeclaringType.Name.Contains("AsyncUniTaskMethodBuilder")
+                    || methodRef.DeclaringType.Name.Contains("AsyncUniTaskVoidMethodBuilder")
                    && methodRef.Name.Equals("Start");
         }
 
@@ -510,7 +518,7 @@ namespace CompileServer.Helper
 
             // 清除ReloadHelper的缓存和临时文件
             ReloadHelper.Clear();
-            
+
             Console.WriteLine("已清除所有缓存和临时文件");
         }
 

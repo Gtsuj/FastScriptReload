@@ -132,7 +132,7 @@ namespace CompileServer.Services
                 {
                     Directory.Delete(outputPath, true);
                 }
-                catch (Exception e)
+                catch (Exception)
                 {
                     // ignored
                 }
