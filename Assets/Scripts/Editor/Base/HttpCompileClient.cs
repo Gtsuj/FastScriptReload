@@ -492,7 +492,7 @@ namespace FastScriptReload.Editor
                     LoggerScoped.Log($"🛑 停止编译服务进程: PID={_localProcess.Id}");
                     _localProcess.Kill();
                     _localProcess.WaitForExit(3000); // 等待最多3秒
-                    _localProcess.Dispose();
+                    _localProcess?.Dispose();
                     _localProcess = null;
                     LoggerScoped.Log("✅ 编译服务进程已停止");
                 }
