@@ -30,16 +30,16 @@ namespace HookInfo.Models
         /// </summary>
         public Dictionary<string, HookFieldInfo> ModifiedFields { get; } = new();
 
-        public void AddOrModifyMethod(string fullName, MethodDefinition methodDef, MemberModifyState hookMethodState)
+        public void AddOrModifyMethod(string fullName, MethodDefinition wrapperMethodDef, MemberModifyState hookMethodState)
         {
             if (!ModifiedMethods.TryGetValue(fullName, out var hookMethodInfo))
             {
-                hookMethodInfo = new HookMethodInfo(fullName, methodDef, hookMethodState);
+                hookMethodInfo = new HookMethodInfo(fullName, wrapperMethodDef, hookMethodState);
                 ModifiedMethods.Add(fullName, hookMethodInfo);
             }
             else
             {
-                hookMethodInfo.WrapperMethodDef = methodDef;
+                hookMethodInfo.WrapperMethodDef = wrapperMethodDef;
             }
         }
     }

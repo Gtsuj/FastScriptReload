@@ -460,11 +460,11 @@ namespace FastScriptReload.Editor
                 }
 
                 var responseJson = await response.Content.ReadAsStringAsync();
-                var result = JsonConvert.DeserializeObject<CompileResponse>(responseJson, JsonSettings); // ✅ 使用共享类型
+                var result = JsonConvert.DeserializeObject<CompileResponse>(responseJson, JsonSettings);
 
                 if (result.Success)
                 {
-                    LoggerScoped.LogDebug($"✅ 编译成功: {result.HookTypeInfos.Count} 个类型, 耗时 {result.ElapsedMilliseconds}ms, 缓存: {result.IsFromCache}");
+                    LoggerScoped.LogDebug($"✅ 编译成功: {result.HookTypeInfos.Count} 个类型, 耗时 {result.ElapsedMilliseconds}ms");
                 }
                 else
                 {

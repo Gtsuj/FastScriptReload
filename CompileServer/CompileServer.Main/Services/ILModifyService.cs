@@ -1,3 +1,4 @@
+using System.Reflection;
 using CompileServer.Helper;
 using CompileServer.Helpers;
 using CompileServer.Models;
@@ -19,427 +20,508 @@ namespace CompileServer.Services
     // ReSharper disable once InconsistentNaming
     public class ILModifyService
     {
+        #region 私有字段
+
         private readonly ILogger<ILModifyService> _logger;
+        
+        private Dictionary<string, AssemblyDefinition> _wrapperAssemblyDict = new();
+
+        #endregion
+
+        #region 构造函数
 
         public ILModifyService(ILogger<ILModifyService> logger)
         {
             _logger = logger;
         }
 
+        #endregion
+
+        #region Public 方法
+
         /// <summary>
-        /// 修改编译后的程序集，生成 Wrapper 程序集
+        /// 修改编译程序集
         /// </summary>
-        public string ModifyCompileAssembly(string assemblyName, Dictionary<string, DiffResult> diffResults)
+        public Dictionary<string, HookTypeInfo> ModifyCompileAssembly(Dictionary<string, DiffResult> diffResults)
         {
-            var assemblyDef = TypeInfoHelper.CloneAssemblyDefinition(assemblyName);
-            if (assemblyDef == null)
+            try
             {
-                throw new Exception($"无法克隆程序集: {assemblyName}");
-            }
+                PreHandleMember(diffResults);
 
-            NestedTypeInfo.Clear();
-
-            // 从全局缓存中获取或创建 HookTypeInfo
-            foreach (var (typeFullName, diffResult) in diffResults)
-            {
-                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeFullName, out var cachedHookTypeInfo))
+                foreach (var (_, wrapperAssemblyDef) in _wrapperAssemblyDict)
                 {
-                    cachedHookTypeInfo = new HookTypeInfo
-                    {
-                        TypeFullName = typeFullName,
-                        AssemblyName = assemblyName,
-                    };
-                    ReloadHelper.HookTypeInfoCache[typeFullName] = cachedHookTypeInfo;
+                    HandleMethodsInAssembly(wrapperAssemblyDef);
                 }
+
+                // 保存所有程序集，并建立 assemblyName -> filePath 的映射
+                var assemblyPathMap = new Dictionary<string, string>();
+                foreach (var (assemblyName, wrapperAssemblyDef) in _wrapperAssemblyDict)
+                {
+                    // 生成文件名并保存
+                    var filePath = Path.Combine(ReloadHelper.AssemblyOutputPath, $"{wrapperAssemblyDef.Name.Name}.dll");
+                    wrapperAssemblyDef.Write(filePath, ReloadHelper.WRITER_PARAMETERS);
+                    wrapperAssemblyDef.Dispose();
+
+                    assemblyPathMap[assemblyName] = filePath;
+                }
+
+                // 设置程序集路径并提取本次编译涉及的具体方法和字段信息
+                return SetAssemblyPathAndExtractHookTypeInfos(assemblyPathMap, diffResults);
             }
-
-            // 修改程序集
-            HandleAssemblyType(assemblyDef, diffResults);
-
-            // 清理程序集
-            ClearAssembly(assemblyDef, diffResults);
-
-            // 生成文件名并保存
-            var filePath = Path.Combine(ReloadHelper.AssemblyOutputPath, $"{assemblyDef.Name.Name}.dll");
-            assemblyDef.Write(filePath, TypeInfoHelper.WRITER_PARAMETERS);
-            assemblyDef.Dispose();
-
-            // 设置每个类型的程序集路径（从全局缓存中获取）
-            SetAssemblyPath(filePath, diffResults);
-
-            return filePath;
+            finally
+            {
+                _wrapperAssemblyDict.Clear();
+            }
         }
 
-        private void HandleAssemblyType(AssemblyDefinition assemblyDef, Dictionary<string, DiffResult> diffResults)
-        {
-            var mainModule = assemblyDef.MainModule;
+        #endregion
 
-            // 先处理新增字段、注册方法到HookTypeInfo中
+        #region Private 方法 - 主流程
+
+        /// <summary>
+        /// 预所有处理成员
+        /// </summary>
+        private void PreHandleMember(Dictionary<string, DiffResult> diffResults)
+        {
             foreach (var (typeName, diffResult) in diffResults)
             {
-                var typeDef = mainModule.GetType(typeName);
-                if (typeDef == null)
+                var assemblyName = diffResult.AssemblyName;
+                
+                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeName, out var hookTypeInfo))
                 {
-                    continue;
-                }
-
-                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
-                {
-                    continue;
-                }
-
-                // 处理新增字段
-                foreach (var fieldDef in typeDef.Fields)
-                {
-                    if (diffResult.AddedFields.ContainsKey(fieldDef.FullName))
+                    hookTypeInfo = new HookTypeInfo
                     {
-                        hookTypeInfo.ModifiedFields.TryAdd(fieldDef.FullName, new HookFieldInfo(fieldDef));
+                        TypeFullName = typeName,
+                        AssemblyName = assemblyName,
+                    };
+                    ReloadHelper.HookTypeInfoCache[typeName] = hookTypeInfo;
+                }
+
+                var patchAssemblyDef = diffResult.AssemblyDef;
+                var wrapperAssemblyDef = GetOrAddWrapperAssembly(assemblyName, patchAssemblyDef);
+                
+                var typeDef = patchAssemblyDef?.MainModule.GetType(typeName);
+
+                if (patchAssemblyDef != null)
+                {
+                    var targetTypeDef = ExtractTypeToAssembly(wrapperAssemblyDef, typeDef);
+
+                    // 处理修改字段
+                    foreach (var fieldDef in typeDef.Fields)
+                    {
+                        if (diffResult.ModifiedFields.ContainsKey(fieldDef.FullName))
+                        {
+                            hookTypeInfo.ModifiedFields.TryAdd(fieldDef.FullName, new HookFieldInfo(typeName, fieldDef.FullName));
+                            targetTypeDef.Fields.Add(new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, wrapperAssemblyDef.MainModule)));
+                        }
+                    }
+
+                    // 处理修改方法
+                    foreach (var methodDef in typeDef.Methods)
+                    {
+                        if (!diffResult.ModifiedMethods.TryGetValue(methodDef.FullName, out var methodDiffInfo))
+                        {
+                            continue;
+                        }
+
+                        var wrapperMethodDef = ExtractMethodToAssembly(wrapperAssemblyDef, methodDef);
+                        hookTypeInfo.AddOrModifyMethod(methodDef.FullName, wrapperMethodDef, methodDiffInfo.ModifyState);
                     }
                 }
-
-                // 处理原方法
-                for (int i = typeDef.Methods.Count - 1; i >= 0; i--)
+                
+                // 处理泛型调用者
+                foreach (var (methodName, methodDiffInfo) in diffResult.ModifiedMethods)
                 {
-                    var methodDef = typeDef.Methods[i];
-                    if (!diffResult.ModifiedMethods.TryGetValue(methodDef.FullName, out var methodDiffInfo))
+                    if (!methodDiffInfo.IsMethodCaller)
                     {
                         continue;
                     }
 
-                    hookTypeInfo.AddOrModifyMethod(methodDef.FullName, methodDef, methodDiffInfo.ModifyState);
-                }
-            }
-
-            // 处理方法引用
-            foreach (var (typeName, result) in diffResults)
-            {
-                var typeDef = mainModule.GetType(typeName);
-                if (typeDef == null)
-                {
-                    continue;
-                }
-
-                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
-                {
-                    continue;
-                }
-
-                foreach (var (methodFullName, _) in result.ModifiedMethods)
-                {
-                    if (!hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var hookMethodInfo))
+                    if (typeDef != null && typeDef.Methods.Any(m => m.FullName == methodName))
                     {
+                        // 已经处理过的方法
                         continue;
                     }
 
-                    HandleMethodDefinition(hookMethodInfo.WrapperMethodDef, mainModule);
+                    var callerMethodDef = ReloadHelper.GetLatestMethodDefinition(typeName, methodName);
+                    var wrapperMethodDef = ExtractMethodToAssembly(wrapperAssemblyDef, callerMethodDef);
+                    hookTypeInfo.AddOrModifyMethod(methodName, wrapperMethodDef, methodDiffInfo.ModifyState);
                 }
             }
+        }
 
-            // 处理内部类
-            foreach (var (nestedTypeName, nestedTypeInfo) in NestedTypeInfo.NestedTypeInfos)
+        /// <summary>
+        /// 处理程序集中的方法体
+        /// </summary>
+        private void HandleMethodsInAssembly(AssemblyDefinition wrapperAssemblyDef)
+        {
+            var module = wrapperAssemblyDef.MainModule;
+
+            foreach (var typeDef in module.Types)
             {
-                var typeDef = mainModule.GetType(nestedTypeName);
-                if (typeDef == null)
+                foreach (var methodDef in typeDef.Methods)
+                {
+                    HandleMethodInstruction(methodDef, module);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 设置程序集路径并提取本次编译涉及的具体方法和字段信息
+        /// </summary>
+        private Dictionary<string, HookTypeInfo> SetAssemblyPathAndExtractHookTypeInfos(
+            Dictionary<string, string> assemblyPathMap, Dictionary<string, DiffResult> diffResults)
+        {
+            var allHookTypeInfos = new Dictionary<string, HookTypeInfo>();
+            
+            foreach (var (typeFullName, diffResult) in diffResults)
+            {
+                // 从全局缓存中获取完整的 HookTypeInfo
+                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeFullName, out var cachedHookTypeInfo))
                 {
                     continue;
                 }
 
-                // 内部类是Task生成出来的状态机，则保留整个内部类
-                bool isTaskStateMachine = TypeInfoHelper.TypeIsTaskStateMachine(typeDef);
-                foreach (var methodDef in typeDef.Methods.ToArray())
+                // 获取该类型对应的程序集路径
+                if (!assemblyPathMap.TryGetValue(diffResult.AssemblyName, out var assemblyPath))
                 {
-                    bool isHandleMethodDef = isTaskStateMachine || methodDef.FullName.Contains("ctor");
-                    if (isHandleMethodDef)
-                    {
-                        HandleMethodDefinition(methodDef, mainModule);
-                    }
+                    continue;
+                }
 
-                    if (!isHandleMethodDef && !nestedTypeInfo.Methods.Contains(methodDef.FullName))
+                // 创建新的 HookTypeInfo，只包含本次编译改动的方法和字段
+                var hookTypeInfo = new HookTypeInfo
+                {
+                    TypeFullName = cachedHookTypeInfo.TypeFullName,
+                    AssemblyName = cachedHookTypeInfo.AssemblyName
+                };
+
+                // 处理本次改动的方法：设置路径并添加到结果中
+                foreach (var (methodFullName, _) in diffResult.ModifiedMethods)
+                {
+                    if (cachedHookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var hookMethodInfo))
                     {
-                        typeDef.Methods.Remove(methodDef);
+                        // 设置程序集路径
+                        hookMethodInfo.HistoricalHookedAssemblyPaths.Add(assemblyPath);
+                        
+                        // 添加到返回结果
+                        hookTypeInfo.ModifiedMethods[methodFullName] = hookMethodInfo;
                     }
                 }
 
-                foreach (var fieldDef in typeDef.Fields.ToArray())
+                // 处理本次改动的字段：设置路径并添加到结果中
+                foreach (var (fieldFullName, _) in diffResult.ModifiedFields)
                 {
-                    if (isTaskStateMachine || nestedTypeInfo.Fields.Contains(fieldDef.FullName))
+                    if (cachedHookTypeInfo.ModifiedFields.TryGetValue(fieldFullName, out var hookFieldInfo))
                     {
-                        fieldDef.DeclaringType = (TypeDefinition)GetOriginalType(fieldDef.DeclaringType, mainModule);
-                        fieldDef.FieldType = GetOriginalType(fieldDef.FieldType, mainModule);
+                        // 设置程序集路径
+                        hookFieldInfo.HistoricalHookedAssemblyPaths.Add(assemblyPath);
+                        
+                        // 添加到返回结果
+                        hookTypeInfo.ModifiedFields.TryAdd(fieldFullName, hookFieldInfo);
+                    }
+                }
+
+                // 只有当有实际改动时才添加到结果中
+                if (hookTypeInfo.ModifiedMethods.Count > 0 || hookTypeInfo.ModifiedFields.Count > 0)
+                {
+                    allHookTypeInfos[typeFullName] = hookTypeInfo;
+                }
+            }
+
+            return allHookTypeInfos;
+        }
+
+        #endregion
+
+        #region Private 方法 - 程序集和类型提取
+
+        /// <summary>
+        /// 获取或添加包装程序集
+        /// </summary>
+        private AssemblyDefinition GetOrAddWrapperAssembly(string assemblyName, AssemblyDefinition patchAssembly)
+        {
+            if (!_wrapperAssemblyDict.TryGetValue(assemblyName, out var assemblyDef))
+            {
+                if (patchAssembly == null)
+                {
+                    var wrapperAssemblyName = ReloadHelper.GetWrapperAssemblyName(assemblyName);
+                    assemblyDef = AssemblyDefinition.CreateAssembly(new AssemblyNameDefinition(wrapperAssemblyName, new Version(0, 0, 0, 0)), wrapperAssemblyName, ModuleKind.Dll);
+                }
+                else
+                {
+                    assemblyDef = AssemblyDefinition.CreateAssembly(patchAssembly.Name, patchAssembly.MainModule.Name, ModuleKind.Dll);
+                }
+                
+                _wrapperAssemblyDict[assemblyName] = assemblyDef;
+            }
+
+            return assemblyDef;
+        }
+
+        /// <summary>
+        /// 将指定类型提取到目标程序集
+        /// </summary>
+        private TypeDefinition ExtractTypeToAssembly(AssemblyDefinition wrapperAssemblyDef, TypeDefinition typeDef)
+        {
+            var module = wrapperAssemblyDef.MainModule;
+            var type = module.GetType(typeDef.FullName);
+            if (type == null)
+            {
+                if (typeDef.IsNested)
+                {
+                    type = new TypeDefinition(typeDef.Namespace, typeDef.Name, typeDef.Attributes, GetOriginalType(typeDef.BaseType, module));
+
+                    if (TypeInfoHelper.IsCompilerGeneratedType(typeDef))
+                    {
+                        foreach (var implementation in typeDef.Interfaces)
+                        {
+                            type.Interfaces.Add(new InterfaceImplementation(GetOriginalType(implementation.InterfaceType, module)));
+                        }
+
+                        foreach (var attribute in typeDef.CustomAttributes)
+                        {
+                            type.CustomAttributes.Add(new CustomAttribute(module.ImportReference(attribute.Constructor)));
+                        }
                     }
                     else
                     {
-                        typeDef.Fields.Remove(fieldDef);
+                        type.IsPublic = true;
                     }
+
+                    module.GetType(typeDef.DeclaringType.FullName).NestedTypes.Add(type);
+                }
+                else
+                {
+                    type = new TypeDefinition(typeDef.Namespace, typeDef.Name, typeDef.Attributes, GetOriginalType(typeDef.Module.TypeSystem.Object, module))
+                    {
+                        IsPublic = true
+                    };
+                    module.Types.Add(type);
                 }
             }
 
-            // 给所有方法加上this参数
-            foreach (var (typeName, result) in diffResults)
+            return type;
+        }
+
+        private void HandleMethodParam(MethodReference sourceMethodRef, MethodReference targetMethodRef, ModuleDefinition module)
+        {
+            Dictionary<string, GenericParameter> genericParameters = new();
+
+            // 复制泛型参数
+            if (sourceMethodRef.HasGenericParameters)
             {
-                var typeDef = mainModule.GetType(typeName);
-                if (typeDef == null)
+                foreach (GenericParameter originalGenericParam in sourceMethodRef.GenericParameters)
                 {
-                    continue;
-                }
-
-                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
-                {
-                    continue;
-                }
-
-                typeDef.Interfaces.Clear();
-                bool setBaseType = typeDef.BaseType != null && typeDef.BaseType.FullName != "System.Object";
-                if (setBaseType)
-                {
-                    typeDef.BaseType = mainModule.TypeSystem.Object;
-                }
-
-                foreach (var (methodFullName, _) in result.ModifiedMethods)
-                {
-                    if (!hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var hookMethodInfo))
+                    var newGenericParam = new GenericParameter(originalGenericParam.Name, targetMethodRef)
                     {
-                        continue;
+                        Attributes = originalGenericParam.Attributes
+                    };
+
+                    // 复制约束
+                    foreach (var constraint in originalGenericParam.Constraints)
+                    {
+                        newGenericParam.Constraints.Add(new GenericParameterConstraint(GetOriginalType(constraint.ConstraintType, module)));
                     }
 
-                    var methodDef = hookMethodInfo.WrapperMethodDef;
+                    targetMethodRef.GenericParameters.Add(newGenericParam);
 
-                    // 将@this参数加入到方法参数列表的头部
-                    if (!methodDef.IsStatic)
-                    {
-                        methodDef.Parameters.Insert(0, new ParameterDefinition("this", ParameterAttributes.None, typeDef));
-                        methodDef.HasThis = false;
-                        methodDef.ExplicitThis = false;
-                    }
+                    genericParameters.Add(newGenericParam.Name, newGenericParam);
+                }
+            }
+            
+            targetMethodRef.ReturnType = GetOriginalType(targetMethodRef.ReturnType, module, genericParameters);
 
-                    methodDef.Attributes = MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig;
-                    methodDef.ImplAttributes |= MethodImplAttributes.NoInlining;
+            // 复制参数
+            foreach (var originalParam in sourceMethodRef.Parameters)
+            {
+                var newParam = new ParameterDefinition(
+                    originalParam.Name,
+                    originalParam.Attributes,
+                    GetOriginalType(originalParam.ParameterType, module, genericParameters));
 
-                    if (setBaseType)
-                    {
-                        methodDef.Overrides.Clear();
-                    }
+                // 复制默认值
+                if (originalParam.HasConstant)
+                {
+                    newParam.Constant = originalParam.Constant;
+                }
 
-                    hookMethodInfo.WrapperMethodName = methodDef.FullName;
+                targetMethodRef.Parameters.Add(newParam);
+            }
+            
+            if (sourceMethodRef is MethodDefinition sourceMethodDef && targetMethodRef is MethodDefinition targetMethodDef
+                && sourceMethodDef.HasBody)
+            {
+                // 局部变量引用处理
+                foreach (var variable in sourceMethodDef.Body.Variables)
+                {
+                    targetMethodDef.Body.Variables.Add(new VariableDefinition(GetOriginalType(variable.VariableType, module, genericParameters)));
                 }
             }
         }
-
+        
         /// <summary>
-        /// 清理程序集：删除未使用的类型
+        /// 将指定方法提取到目标程序集，指令不处理
         /// </summary>
-        private void ClearAssembly(AssemblyDefinition assemblyDef, Dictionary<string, DiffResult> diffResults)
+        private MethodDefinition ExtractMethodToAssembly(AssemblyDefinition wrapperAssemblyDef, MethodDefinition methodDef, bool addThisParam = true)
         {
-            var mainModule = assemblyDef.MainModule;
+            var type = ExtractTypeToAssembly(wrapperAssemblyDef, methodDef.DeclaringType);
+            
+            MethodDefinition wrapperMethodDef = null;
+            wrapperMethodDef = type.Methods.FirstOrDefault((method => method.FullName.Equals(methodDef.FullName)));
 
-            // 清理编译器生成的特性
-            var compilerNamespaces = new[] { "System.Runtime.CompilerServices", "Microsoft.CodeAnalysis" };
-
-            void CleanupAttributesByNamespace(ICollection<CustomAttribute> attributes)
+            if (wrapperMethodDef != null)
             {
-                foreach (var attr in attributes.ToArray())
-                {
-                    var attrNamespace = attr.AttributeType.Namespace ?? string.Empty;
-                    if (compilerNamespaces.Any(ns => attrNamespace.Equals(ns) || attrNamespace.StartsWith($"{ns}.")))
-                    {
-                        attributes.Remove(attr);
-                    }
-                }
+                return wrapperMethodDef;
             }
 
-            CleanupAttributesByNamespace(mainModule.CustomAttributes);
-            CleanupAttributesByNamespace(mainModule.Assembly.CustomAttributes);
-
-            // 统一清理程序集
-            foreach (var typeDef in mainModule.Types.ToArray())
+            var module = wrapperAssemblyDef.MainModule;
+            
+            // 创建新方法定义
+            if (methodDef.DeclaringType.IsNested && TypeInfoHelper.IsCompilerGeneratedType(methodDef.DeclaringType))
             {
-                ClearType(diffResults, typeDef, mainModule);
-            }
-        }
+                wrapperMethodDef = new MethodDefinition(methodDef.Name, methodDef.Attributes, GetOriginalType(methodDef.ReturnType, module));
 
-        private static void ClearType(Dictionary<string, DiffResult> diffResults, TypeDefinition typeDef, ModuleDefinition mainModule)
-        {
-            // 删除没有Hook的类型
-            if (!diffResults.TryGetValue(typeDef.FullName, out var result))
-            {
-                bool inNestedType = false;
-                // 处理只修改嵌套类但是父类没被修改得情况
-                foreach (var nestedType in typeDef.NestedTypes)
+                foreach (var methodOverride in methodDef.Overrides)
                 {
-                    if (diffResults.ContainsKey(nestedType.FullName))
-                    {
-                        inNestedType = true;
-                        ClearType(diffResults, nestedType, mainModule);
-                        break;
-                    }
+                    wrapperMethodDef.Overrides.Add(module.ImportReference(methodOverride));
                 }
-
-                if (!inNestedType)
-                {
-                    mainModule.Types.Remove(typeDef);
-                    return;
-                }
-
-                typeDef.Methods.Clear();
-                typeDef.Fields.Clear();
-                typeDef.Properties.Clear();
-                typeDef.Events.Clear();
-                return;
-            }
                 
-            // 清理方法（从全局缓存中获取）
-            if (ReloadHelper.HookTypeInfoCache.TryGetValue(typeDef.FullName, out var hookTypeInfo))
-            {
-                typeDef.Methods.Clear();
-                foreach (var (methodFullName, _) in result.ModifiedMethods)
+                foreach (var attribute in methodDef.CustomAttributes)
                 {
-                    if (hookTypeInfo.ModifiedMethods.TryGetValue(methodFullName, out var modifiedMethod))
-                    {
-                        // 直接使用 WrapperMethodDef，与原始逻辑一致
-                        if (modifiedMethod.WrapperMethodDef != null)
-                        {
-                            typeDef.Methods.Add(modifiedMethod.WrapperMethodDef);
-                        }
-                    }
+                    wrapperMethodDef.CustomAttributes.Add(new CustomAttribute(module.ImportReference(attribute.Constructor)));
+                }
+            }
+            else
+            {
+                wrapperMethodDef = new MethodDefinition(methodDef.Name, MethodAttributes.Public | MethodAttributes.Static, methodDef.ReturnType)
+                {
+                    ImplAttributes = MethodImplAttributes.NoInlining,
+                };
+            }
+
+            if (!methodDef.IsStatic && addThisParam)
+            {
+                wrapperMethodDef.Parameters.Insert(0, new ParameterDefinition("this", ParameterAttributes.None, GetOriginalType(methodDef.DeclaringType, module)));
+                wrapperMethodDef.HasThis = false;
+                wrapperMethodDef.ExplicitThis = false;
+            }
+
+            HandleMethodParam(methodDef, wrapperMethodDef, module);
+
+            if (methodDef.HasBody)
+            {
+                wrapperMethodDef.Body.MaxStackSize = methodDef.Body.MaxStackSize;
+                wrapperMethodDef.Body.InitLocals = methodDef.Body.InitLocals;
+
+                // 复制所有指令
+                var newProcessor = wrapperMethodDef.Body.GetILProcessor();
+                var instructions = methodDef.Body.Instructions.ToArray();
+                for (int i = 0; i < instructions.Length; i++)
+                {
+                    newProcessor.Append(instructions[i]);
+                }
+
+                // 复制异常处理块
+                foreach (var originalHandler in methodDef.Body.ExceptionHandlers)
+                {
+                    originalHandler.CatchType = originalHandler.CatchType != null ? GetOriginalType(originalHandler.CatchType, module) : null;
+                    wrapperMethodDef.Body.ExceptionHandlers.Add(originalHandler);
                 }
             }
 
-            // 清理字段
-            for (int i = typeDef.Fields.Count - 1; i >= 0; i--)
+            // 调试信息
+            if (methodDef.DebugInformation.HasSequencePoints)
             {
-                var fieldDef = typeDef.Fields[i];
-                if (!result.AddedFields.ContainsKey(fieldDef.FullName))
+                foreach (var sequencePoint in methodDef.DebugInformation.SequencePoints)
                 {
-                    typeDef.Fields.RemoveAt(i);
+                    wrapperMethodDef.DebugInformation.SequencePoints.Add(sequencePoint);
                 }
+
+                // 处理调试信息中的类型引用
+                HandleImportScope(wrapperMethodDef.DebugInformation?.Scope?.Import, module);
             }
 
-            // 清理内部类
-            for (int i = typeDef.NestedTypes.Count - 1; i >= 0; i--)
-            {
-                var nestedType = typeDef.NestedTypes[i];
-                if (!NestedTypeInfo.NestedTypeInfos.ContainsKey(nestedType.FullName))
-                {
-                    typeDef.NestedTypes.RemoveAt(i);
-                }
-            }
+            // 将新方法添加到类型中
+            type.Methods.Add(wrapperMethodDef);
 
-            typeDef.Properties.Clear();
-            typeDef.Events.Clear();
+            return wrapperMethodDef;
         }
 
-        /// <summary>
-        /// 设置程序集路径
-        /// </summary>
-        private void SetAssemblyPath(string assemblyPath, Dictionary<string, DiffResult> diffResults)
+        private TypeDefinition ExtractNestedTypeToAssembly(AssemblyDefinition wrapperAssemblyDef, TypeDefinition typeDef)
         {
-            foreach (var (typeFullName, diffResult) in diffResults)
+            var module = wrapperAssemblyDef.MainModule;
+            var nestedType = module.GetType(typeDef.FullName);
+            if (nestedType != null)
             {
-                if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeFullName, out var hookTypeInfo))
+                return nestedType;
+            }
+
+            nestedType = ExtractTypeToAssembly(wrapperAssemblyDef, typeDef);
+
+            var isTaskStateMachine = TypeInfoHelper.TypeIsTaskStateMachine(typeDef);
+            var isCompilerGenerated = TypeInfoHelper.IsCompilerGeneratedType(typeDef);
+
+            if (isTaskStateMachine)
+            {
+                foreach (var fieldDef in typeDef.Fields)
                 {
-                    continue;
+                    nestedType.Fields.Add(new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, module)));
                 }
 
-                foreach (var (_, methodInfo) in diffResult.ModifiedMethods)
+                foreach (var propertyDef in typeDef.Properties)
                 {
-                    if (hookTypeInfo.ModifiedMethods.TryGetValue(methodInfo.FullName, out var modifiedMethodInfo))
-                    {
-                        modifiedMethodInfo.AssemblyPath = assemblyPath;
-                        if (modifiedMethodInfo.MemberModifyState == MemberModifyState.Added)
-                        {
-                            modifiedMethodInfo.HistoricalHookedAssemblyPaths.Add(assemblyPath);
-                        }
-                    }
-                }
-
-                foreach (var (_, fieldInfo) in diffResult.AddedFields)
-                {
-                    if (hookTypeInfo.ModifiedFields.TryGetValue(fieldInfo.FullName, out var addedFieldInfo))
-                    {
-                        addedFieldInfo.AssemblyPath = assemblyPath;
-                    }
+                    nestedType.Properties.Add(new PropertyDefinition(propertyDef.Name, propertyDef.Attributes, GetOriginalType(propertyDef.PropertyType, module)));
                 }
             }
+
+            if (isTaskStateMachine || isCompilerGenerated)
+            {
+                foreach (var methodDef in typeDef.Methods)
+                {
+                    if (isTaskStateMachine || methodDef.IsConstructor)
+                    {
+                        var wrapperMethodDef = ExtractMethodToAssembly(wrapperAssemblyDef, methodDef, false);
+                        HandleMethodInstruction(wrapperMethodDef, wrapperAssemblyDef.MainModule);
+                    }
+                }   
+            }
+
+            return nestedType;
         }
+        #endregion
 
-        #region 方法、字段修改
+        #region Private 方法 - 指令处理
 
-        /// <summary>
-        /// 创建指令
-        /// </summary>
-        private void HandleInstruction(ILProcessor processor, Instruction sourceInst, ModuleDefinition module)
+        private void HandleMethodInstruction(MethodDefinition methodDef, ModuleDefinition module)
         {
-            if (sourceInst.Operand == null)
-            {
-                processor.Append(sourceInst);
-                return;
-            }
-
-            switch (sourceInst.Operand)
-            {
-                case TypeReference typeRef:
-                    sourceInst.Operand = GetOriginalType(typeRef, module);
-                    break;
-                case FieldReference:
-                    HandleFieldReference(processor, sourceInst, module);
-                    return;
-                case MethodReference methodRef:
-                    sourceInst.Operand = HandleMethodReference(methodRef, module);
-                    break;
-            }
-
-            processor.Append(sourceInst);
-        }
-
-        /// <summary>
-        /// 处理方法定义和指令
-        /// </summary>
-        private void HandleMethodDefinition(MethodDefinition methodDef, ModuleDefinition moduleDef)
-        {
-            // 返回类型处理
-            methodDef.ReturnType = GetOriginalType(methodDef.ReturnType, moduleDef);
-
-            // 泛型参数引用处理
-            if (methodDef.HasGenericParameters)
-            {
-                foreach (GenericParameter genericParameter in methodDef.GenericParameters)
-                {
-                    foreach (var constraint in genericParameter.Constraints)
-                    {
-                        constraint.ConstraintType = GetOriginalType(constraint.ConstraintType, moduleDef);
-                    }
-                }
-            }
-
-            // 参数引用处理
-            foreach (var param in methodDef.Parameters)
-            {
-                param.ParameterType = GetOriginalType(param.ParameterType, moduleDef);
-            }
-
-            if (!methodDef.HasBody)
-            {
-                return;
-            }
-
-            // 局部变量引用处理
-            foreach (var variable in methodDef.Body.Variables)
-            {
-                variable.VariableType = GetOriginalType(variable.VariableType, moduleDef);
-            }
-
-            // 创建所有指令
             var instructions = methodDef.Body.Instructions.ToArray();
             var processor = methodDef.Body.GetILProcessor();
             processor.Clear();
 
             for (int i = 0; i < instructions.Length; i++)
             {
-                HandleInstruction(processor, instructions[i], moduleDef);
-            }
+                var sourceInst = instructions[i];
+                if (sourceInst.Operand == null)
+                {
+                    processor.Append(sourceInst);
+                    continue;
+                }
 
-            // 处理调试信息中的类型引用
-            HandleImportScope(methodDef?.DebugInformation?.Scope?.Import, moduleDef);
+                switch (sourceInst.Operand)
+                {
+                    case TypeReference typeRef:
+                        sourceInst.Operand = GetOriginalType(typeRef, module, methodDef.HasGenericParameters ? methodDef.GenericParameters.ToDictionary(gp => gp.Name) : null);
+                        break;
+                    case FieldReference:
+                        HandleFieldReference(processor, sourceInst, module);
+                        continue;
+                    case MethodReference methodRef:
+                        sourceInst.Operand = HandleMethodReference(methodRef, module);
+                        break;
+                }
+
+                processor.Append(sourceInst);
+            }
         }
 
         /// <summary>
@@ -473,35 +555,21 @@ namespace CompileServer.Services
         /// </summary>
         private MethodReference HandleMethodReference(MethodReference methodRef, ModuleDefinition module)
         {
-            // 编译时创建的内部类的成员后续统一处理
-            if (TypeInfoHelper.IsCompilerGeneratedType(methodRef.DeclaringType as TypeDefinition))
+            if (methodRef.DeclaringType.IsNested && methodRef is MethodDefinition nestedMethodDef)
             {
-                if (NestedTypeInfo.AddMethod(methodRef))
-                {
-                    HandleMethodDefinition(methodRef as MethodDefinition, module);
-                }
-                return methodRef;
-            }
-
-            if (TypeInfoHelper.IsTaskCallStartMethod(methodRef))
-            {
-                var callMethodDef = TypeInfoHelper.FindTaskCallMethod(methodRef);
-                if (NestedTypeInfo.AddMethod(callMethodDef))
-                {
-                    HandleMethodDefinition(callMethodDef, module);
-                }
-                return methodRef;
+                var wrapperMethodDef = GetNestedMethodDefinition(module.Assembly, nestedMethodDef);
+                return wrapperMethodDef;
             }
 
             if (!CheckMethodIsScopeInModule(methodRef, module))
             {
-                return methodRef;
+                return module.ImportReference(methodRef);
             }
 
             // 处理新增/泛型方法调用（从全局缓存中获取）
             if (ReloadHelper.HookTypeInfoCache.TryGetValue(methodRef.DeclaringType.FullName, out var hookTypeInfo))
             {
-                var methodName = methodRef.IsGenericInstance ? methodRef.GetElementMethod().FullName : methodRef.FullName;
+                var methodName = methodRef.IsGenericInstance ? TypeInfoHelper.GetGenericMethodDefName(methodRef.GetElementMethod().FullName) : methodRef.FullName;
 
                 if (hookTypeInfo.ModifiedMethods.TryGetValue(methodName, out var methodInfo))
                 {
@@ -517,26 +585,16 @@ namespace CompileServer.Services
                 }
             }
 
-            MethodReference CopyMethodReference(MethodReference targetMethodRef)
+            MethodReference CopyMethodReference(MethodReference sourceMethodRef)
             {
-                var newMethodRef = new MethodReference(targetMethodRef.Name, GetOriginalType(targetMethodRef.ReturnType, module), GetOriginalType(targetMethodRef.DeclaringType, module))
+                var newMethodRef = new MethodReference(sourceMethodRef.Name, sourceMethodRef.ReturnType, GetOriginalType(sourceMethodRef.DeclaringType, module))
                 {
-                    HasThis = targetMethodRef.HasThis,
-                    ExplicitThis = targetMethodRef.ExplicitThis,
-                    CallingConvention = targetMethodRef.CallingConvention
+                    HasThis = sourceMethodRef.HasThis,
+                    ExplicitThis = sourceMethodRef.ExplicitThis,
+                    CallingConvention = sourceMethodRef.CallingConvention
                 };
 
-                // 添加参数
-                foreach (var parameter in targetMethodRef.Parameters)
-                {
-                    newMethodRef.Parameters.Add(new ParameterDefinition(GetOriginalType(parameter.ParameterType, module)));
-                }
-
-                // 泛型参数
-                foreach (var parameter in targetMethodRef.GenericParameters)
-                {
-                    newMethodRef.GenericParameters.Add(new GenericParameter(parameter.Name, parameter.Owner));
-                }
+                HandleMethodParam(sourceMethodRef, newMethodRef, module);
 
                 return newMethodRef;
             }
@@ -549,9 +607,19 @@ namespace CompileServer.Services
                 return CreateGenericInstanceMethod(elementMethod, genericInstanceMethod.GenericArguments, module);
             }
 
+            var originalMethodRef = TypeInfoHelper.GetOriginalMethodReference(methodRef, module);
+
+            if (originalMethodRef != null)
+            {
+                return originalMethodRef;
+            }
+
             return CopyMethodReference(methodRef);
         }
 
+        /// <summary>
+        /// 创建泛型实例方法
+        /// </summary>
         private MethodReference CreateGenericInstanceMethod(MethodReference elementMethod, Collection<TypeReference> genericArguments, ModuleDefinition module)
         {
             var newGenericInstanceMethod = new GenericInstanceMethod(elementMethod);
@@ -600,7 +668,8 @@ namespace CompileServer.Services
             // 编译时创建的内部类的成员后续统一处理
             if (TypeInfoHelper.IsCompilerGeneratedType(fieldRef.DeclaringType as TypeDefinition))
             {
-                NestedTypeInfo.AddField(fieldRef);
+                // NestedTypeInfo.AddField(fieldRef);
+                inst.Operand = GetNestedFieldDefinition(module.Assembly, fieldRef as FieldDefinition);
                 processor.Append(inst);
                 return;
             }
@@ -674,7 +743,7 @@ namespace CompileServer.Services
 
         #endregion
 
-        #region 类型和方法引用处理
+        #region Private 方法 - 类型和方法引用处理
 
         /// <summary>
         /// 检查类型是否定义在 Hook 程序集中（包括递归检查 TypeSpecification）
@@ -689,7 +758,12 @@ namespace CompileServer.Services
             // 泛型参数不算 Hook 程序集类型
             if (typeRef is GenericParameter)
             {
-                return false;
+                return true;
+            }
+
+            if (typeRef.IsNested)
+            {
+                return true;
             }
 
             // 编译时生成的类型不需要处理
@@ -699,7 +773,7 @@ namespace CompileServer.Services
             }
 
             // 基础类型：直接检查 Scope
-            if (typeRef.Scope.Name.Equals(module.Name))
+            if (typeRef.Scope.Name.Equals(module.Name) || typeRef.Scope is ModuleDefinition)
             {
                 return true;
             }
@@ -715,7 +789,7 @@ namespace CompileServer.Services
                     {
                         return true;
                     }
-
+                    
                     // 检查所有泛型参数（如 Test 是否在 Hook 程序集）
                     foreach (var genericArgument in genericInstanceType.GenericArguments)
                     {
@@ -724,7 +798,7 @@ namespace CompileServer.Services
                             return true;
                         }
                     }
-
+                    
                     return false;
                 }
 
@@ -738,11 +812,40 @@ namespace CompileServer.Services
         /// <summary>
         /// 获取原类型引用
         /// </summary>
-        private TypeReference GetOriginalType(TypeReference typeRef, ModuleDefinition module)
+        private TypeReference GetOriginalType(TypeReference typeRef, ModuleDefinition module, Dictionary<string, GenericParameter> genericParameters = null)
         {
             if (!CheckTypeIsScopeInModule(typeRef, module))
             {
-                return typeRef;
+                return module.ImportReference(typeRef);
+            }
+
+            if (typeRef is GenericParameter genericParameter)
+            {
+                if (genericParameters != null && genericParameters.TryGetValue(genericParameter.Name, out var gp))
+                {
+                    return gp;
+                }
+
+                GenericParameter newGenericParameter = null;
+                switch (genericParameter.Owner)
+                {
+                    case MethodReference methodRef:
+                        newGenericParameter = new GenericParameter(genericParameter.Name, HandleMethodReference(methodRef, module));
+                        break;
+                    case TypeReference typeRefOwner:
+                        newGenericParameter = new GenericParameter(genericParameter.Name, GetOriginalType(typeRefOwner, module));
+                        break;
+                }
+
+                var field = typeof(GenericParameter).GetField("position", BindingFlags.Instance | BindingFlags.NonPublic);
+                field?.SetValue(newGenericParameter, genericParameter.Position);
+
+                return newGenericParameter;
+            }
+            
+            if (typeRef.IsNested && typeRef is TypeDefinition nestedTypeDef)
+            {
+                return ExtractNestedTypeToAssembly(module.Assembly, nestedTypeDef);
             }
 
             if (typeRef is TypeSpecification typeSpec)
@@ -750,17 +853,17 @@ namespace CompileServer.Services
                 // 泛型实例类型（需要处理多个泛型参数）
                 if (typeSpec is GenericInstanceType genericInstanceType)
                 {
-                    return ProcessGenericInstanceType(genericInstanceType, module);
+                    return ProcessGenericInstanceType(genericInstanceType, module, genericParameters);
                 }
 
                 // 数组类型（需要保留维度信息）
                 if (typeSpec is ArrayType arrayType)
                 {
-                    return ProcessArrayType(arrayType, module);
+                    return ProcessArrayType(arrayType, module, genericParameters);
                 }
 
                 // 根据原类型重新构造相应的复合类型
-                var elementType = GetOriginalType(typeSpec.ElementType, module);
+                var elementType = GetOriginalType(typeSpec.ElementType, module, genericParameters);
 
                 return typeSpec switch
                 {
@@ -770,11 +873,11 @@ namespace CompileServer.Services
                     RequiredModifierType reqModType => new RequiredModifierType(GetOriginalType(reqModType.ModifierType, module), elementType),
                     OptionalModifierType optModType => new OptionalModifierType(GetOriginalType(optModType.ModifierType, module), elementType),
                     SentinelType _ => new SentinelType(elementType),
-                    _ => typeSpec // 未知类型，保持原样
+                    _ => module.ImportReference(typeSpec) // 未知类型，保持原样
                 };
             }
 
-            var originalTypeDef = TypeInfoHelper.GetOriginalTypeDefinition(typeRef);
+            var originalTypeDef = TypeInfoHelper.GetOriginalTypeReference(typeRef);
             if (originalTypeDef != null)
             {
                 // 找到原类型，导入引用并返回
@@ -784,12 +887,37 @@ namespace CompileServer.Services
             // 未找到原类型，返回原类型引用（导入引用以确保类型正确）
             return module.ImportReference(typeRef);
         }
+        
+        private FieldDefinition GetNestedFieldDefinition(AssemblyDefinition wrapperAssemblyDef, FieldDefinition fieldDef)
+        {
+            var typeDef = ExtractNestedTypeToAssembly(wrapperAssemblyDef, fieldDef.DeclaringType.Resolve());
+            var wrapperFieldDef = typeDef.Fields.FirstOrDefault(f => f.FullName == fieldDef.FullName);
+            if (wrapperFieldDef == null)
+            {
+                wrapperFieldDef = new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, wrapperAssemblyDef.MainModule));
+                typeDef.Fields.Add(wrapperFieldDef);
+            }
+            return wrapperFieldDef;
+        }
+        
+        private MethodDefinition GetNestedMethodDefinition(AssemblyDefinition wrapperAssemblyDef, MethodDefinition methodDef)
+        {
+            var typeDef = ExtractNestedTypeToAssembly(wrapperAssemblyDef, methodDef.DeclaringType.Resolve());
+            var wrapperMethodDef = typeDef.Methods.FirstOrDefault(m => m.Name == methodDef.Name && m.Parameters.Count == methodDef.Parameters.Count);
+            if (wrapperMethodDef == null)
+            {
+                wrapperMethodDef = ExtractMethodToAssembly(wrapperAssemblyDef, methodDef, false);
+
+                HandleMethodInstruction(wrapperMethodDef, wrapperAssemblyDef.MainModule);
+            }
+            return wrapperMethodDef;
+        }        
 
         /// <summary>
         /// 处理泛型实例类型（如 List&lt;Test&gt;、Dictionary&lt;string, Test[]&gt;）
         /// 特殊性：除了 ElementType，还有多个 GenericArguments 需要处理
         /// </summary>
-        private TypeReference ProcessGenericInstanceType(GenericInstanceType genericInstanceType, ModuleDefinition module)
+        private TypeReference ProcessGenericInstanceType(GenericInstanceType genericInstanceType, ModuleDefinition module, Dictionary<string, GenericParameter> genericParameters = null)
         {
             // 1. 递归处理泛型定义（如 List<> 本身可能也需要重定向）
             var elementType = genericInstanceType.GetElementType();
@@ -799,7 +927,7 @@ namespace CompileServer.Services
             var genericArguments = new TypeReference[genericInstanceType.GenericArguments.Count];
             for (int i = 0; i < genericInstanceType.GenericArguments.Count; i++)
             {
-                genericArguments[i] = GetOriginalType(genericInstanceType.GenericArguments[i], module);
+                genericArguments[i] = GetOriginalType(genericInstanceType.GenericArguments[i], module, genericParameters);
             }
 
             // 3. 用处理后的元素类型和泛型参数重新构造泛型实例
@@ -809,10 +937,11 @@ namespace CompileServer.Services
         /// <summary>
         /// 处理数组类型（如 Test[]、Test[,]、Test[,,]）
         /// </summary>
-        private TypeReference ProcessArrayType(ArrayType arrayType, ModuleDefinition module)
+        private TypeReference ProcessArrayType(ArrayType arrayType, ModuleDefinition module,
+            Dictionary<string, GenericParameter> genericParameters = null)
         {
             // 递归处理数组元素类型
-            var elementType = GetOriginalType(arrayType.ElementType, module);
+            var elementType = GetOriginalType(arrayType.ElementType, module, genericParameters);
 
             var newArrayType = new ArrayType(elementType);
             foreach (var dimension in arrayType.Dimensions)
@@ -878,63 +1007,5 @@ namespace CompileServer.Services
         }
 
         #endregion
-    }
-
-    /// 用户自定义的内部类：
-    /// - 直接在 HandleAssemblyType 主流程中处理（与外部类相同）
-    /// - 可能包含新增/修改的方法，需要正常的 Hook 流程
-    public class NestedTypeInfo
-    {
-        public string NestedTypeName { get; }
-
-        public HashSet<string> Methods { get; } = new();
-
-        public HashSet<string> Fields { get; } = new();
-
-        public NestedTypeInfo(string nestedTypeName)
-        {
-            NestedTypeName = nestedTypeName;
-        }
-
-        public static Dictionary<string, NestedTypeInfo> NestedTypeInfos = new();
-
-        public static bool AddMethod(MethodReference methodRef)
-        {
-            if (!(methodRef.DeclaringType is TypeDefinition typeDef))
-            {
-                return false;
-            }
-
-            var fullName = methodRef.DeclaringType.FullName;
-            if (!NestedTypeInfos.TryGetValue(fullName, out var nestedTypeInfo))
-            {
-                nestedTypeInfo = new NestedTypeInfo(typeDef.FullName);
-                NestedTypeInfos[fullName] = nestedTypeInfo;
-            }
-
-            return nestedTypeInfo.Methods.Add(methodRef.FullName);
-        }
-
-        public static bool AddField(FieldReference fieldRef)
-        {
-            if (!(fieldRef.DeclaringType is TypeDefinition typeDef))
-            {
-                return false;
-            }
-
-            var fullName = fieldRef.DeclaringType.FullName;
-            if (!NestedTypeInfos.TryGetValue(fullName, out var nestedTypeInfo))
-            {
-                nestedTypeInfo = new NestedTypeInfo(typeDef.FullName);
-                NestedTypeInfos[fullName] = nestedTypeInfo;
-            }
-
-            return nestedTypeInfo.Fields.Add(fieldRef.FullName);
-        }
-
-        public static void Clear()
-        {
-            NestedTypeInfos.Clear();
-        }
     }
 }

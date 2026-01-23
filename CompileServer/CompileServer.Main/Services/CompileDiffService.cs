@@ -1,8 +1,20 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Text;
 using CompileServer.Helper;
 using CompileServer.Models;
+using CompileServer.Rewriters;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Mono.Cecil.Pdb;
 using HookInfo.Models;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Emit;
 
 namespace CompileServer.Services
 {
@@ -21,131 +33,46 @@ namespace CompileServer.Services
         /// <summary>
         /// 编译并返回Diff结果
         /// </summary>
-        public async Task<Dictionary<string, DiffResult>> CompileAndDiff(string assemblyName, List<string> files)
+        public Dictionary<string, DiffResult> CompileAndDiff(Dictionary<string,List<string>> filesByAssembly)
         {
-            await TypeInfoHelper.UpdateSyntaxTrees(assemblyName, files);
+            Dictionary<string, DiffResult> diffResults = new Dictionary<string, DiffResult>();
 
-            var assemblyDef = await TypeInfoHelper.Compile(assemblyName);
-            if (assemblyDef == null)
+            // 对每个程序集进行编译和差异计算
+            foreach (var (assemblyName, filesInAssembly) in filesByAssembly)
             {
-                return null;
-            }
+                _logger.LogInformation(
+                    $"Processing compile request for assembly: {assemblyName}, {filesInAssembly.Count} changed files");
 
-            var diffResult = DiffAssembly(assemblyName, files, assemblyDef);
-            if (diffResult == null)
-            {
-                return null;
-            }
-
-            TypeInfoHelper.AddAssemblyDefinition(assemblyName, assemblyDef);
-
-            return diffResult;
-        }
-
-        /// <summary>
-        /// 比较编译出来的程序集中的类型和原有类型，找出其中添加、删除、修改的方法
-        /// </summary>
-        /// <param name="assemblyName">程序集名称</param>
-        /// <param name="files">修改的文件路径列表</param>
-        /// <param name="newAssemblyDef"></param>
-        /// <returns>类型差异结果字典，Key为类型全名，Value为差异结果</returns>
-        private Dictionary<string, DiffResult> DiffAssembly(string assemblyName, List<string> files, AssemblyDefinition newAssemblyDef)
-        {
-            var oldAssemblyDef = TypeInfoHelper.GetAssemblyDefinition(assemblyName);
-            if (newAssemblyDef == null || oldAssemblyDef == null)
-            {
-                _logger.LogError($"无法获取程序集 {assemblyName}");
-                return null;
-            }
-
-            // 获取改动文件中的类型
-            var changedTypes = TypeInfoHelper.GetTypesFromFiles(files);
-            if (changedTypes.Count == 0)
-            {
-                _logger.LogDebug("改动文件中没有找到类型定义");
-                return null;
-            }
-
-            var diffResults = new Dictionary<string, DiffResult>();
-
-            // 对比改动文件中的类型
-            foreach (var typeFullName in changedTypes)
-            {
-                // 从新旧程序集中查找类型定义
-                var newTypeDef = newAssemblyDef.MainModule.GetType(typeFullName);
-                var oldTypeDef = oldAssemblyDef.MainModule.GetType(typeFullName);
-
-                if (newTypeDef == null)
+                // 提取一次改动文件中的类型
+                var changedTypes = TypeInfoHelper.GetTypesFromFiles(filesInAssembly);
+                if (changedTypes.Count == 0)
                 {
-                    _logger.LogDebug($"在新程序集中未找到类型: {typeFullName}");
+                    _logger.LogDebug("改动文件中没有找到类型定义");
                     continue;
                 }
 
-                DiffResult diffResult;
-                if (oldTypeDef == null)
+                // 独立编译改动文件
+                var patchAssembly = CompileChangedFiles(assemblyName, changedTypes);
+                if (patchAssembly == null)
                 {
-                    diffResult = new DiffResult();
-
-                    // 新增类型，记录所有方法和字段
-                    foreach (var method in newTypeDef.Methods)
-                    {
-                        if (!method.IsConstructor && !method.IsGetter && !method.IsSetter)
-                        {
-                            diffResult.ModifiedMethods[method.FullName] = new MethodDiffInfo
-                            {
-                                FullName = method.FullName,
-                                ModifyState = MemberModifyState.Added,
-                                MethodDefinition = method
-                            };
-                        }
-                    }
-
-                    foreach (var field in newTypeDef.Fields)
-                    {
-                        diffResult.AddedFields[field.FullName] = new FieldDiffInfo
-                        {
-                            FullName = field.FullName,
-                            DeclaringTypeFullName = typeFullName
-                        };
-                    }
-
-                    if (diffResult.ModifiedMethods.Count > 0 || diffResult.AddedFields.Count > 0)
-                    {
-                        diffResults[typeFullName] = diffResult;
-                    }
-
                     continue;
                 }
 
-                // 对比类型差异
-                diffResult = CompareTypesWithCecil(oldTypeDef, newTypeDef, typeFullName);
-
-                if (diffResult != null &&
-                    (diffResult.ModifiedMethods.Count > 0 ||
-                     diffResult.AddedFields.Count > 0))
-                {
-                    diffResults[typeFullName] = diffResult;
-                }
+                // 获取到差异部分
+                DiffAssembly(assemblyName, changedTypes, patchAssembly, diffResults);
             }
 
-            if (diffResults.Count == 0)
-            {
-                return null;
-            }
-
-            TypeInfoHelper.UpdateMethodCallGraph(diffResults);
-
-            // 如果泛型方法被修改，将泛型方法的调用者加入修改列表
-            foreach (var (typeFullName, diffResult) in diffResults.ToArray())
+            // 泛型调用者加入Diff列表
+            foreach (var (_, diffResult) in diffResults.ToArray())
             {
                 foreach (var (methodName, modifiedMethod) in diffResult.ModifiedMethods.ToArray())
                 {
-                    if (!modifiedMethod.MethodDefinition.HasGenericParameters)
+                    if (!modifiedMethod.HasGenericParameters)
                     {
                         continue;
                     }
 
-                    var callers = TypeInfoHelper.FindMethodCallers(methodName);
+                    var callers = TypeInfoHelper.GetGenericMethodCallers(methodName);
                     if (callers == null)
                     {
                         continue;
@@ -155,19 +82,14 @@ namespace CompileServer.Services
                     {
                         if (!diffResults.TryGetValue(methodCallInfo.TypeName, out var callerDiffResult))
                         {
-                            callerDiffResult = new DiffResult();
+                            callerDiffResult = new DiffResult()
+                            {
+                                AssemblyName = TypeInfoHelper.GetAssemblyNameFromType(methodCallInfo.TypeName),
+                            };
                             diffResults.Add(methodCallInfo.TypeName, callerDiffResult);
                         }
 
-                        if (!callerDiffResult.ModifiedMethods.ContainsKey(callerMethodName))
-                        {
-                            callerDiffResult.ModifiedMethods.Add(callerMethodName, new MethodDiffInfo()
-                            {
-                                FullName = callerMethodName,
-                                ModifyState = MemberModifyState.Modified,
-                                // MethodDefinition = methodCallInfo.MethodDef
-                            });
-                        }
+                        callerDiffResult.AddModifiedMethod(methodCallInfo.TypeName, callerMethodName);
                     }
                 }
             }
@@ -176,75 +98,240 @@ namespace CompileServer.Services
         }
 
         /// <summary>
-        /// 使用 Mono.Cecil 比较两个类型的方法差异
+        /// 只编译改动文件生成补丁 DLL
         /// </summary>
-        /// <param name="oldTypeDef">旧类型定义</param>
-        /// <param name="newTypeDef">新类型定义</param>
-        /// <param name="typeFullName">类型全名</param>
-        /// <returns>差异结果</returns>
-        private DiffResult CompareTypesWithCecil(TypeDefinition oldTypeDef, TypeDefinition newTypeDef, string typeFullName)
+        /// <param name="assemblyName">程序集名称</param>
+        /// <param name="changedTypes">改动文件中的类型集合</param>
+        /// <returns>补丁 AssemblyDefinition</returns>
+        private AssemblyDefinition CompileChangedFiles(string assemblyName, HashSet<string> changedTypes)
         {
-            var diffResult = new DiffResult();
+            HashSet<string> compileFiles = new(changedTypes);
 
-            // 创建方法签名到方法的映射
-            var oldMethodMap = oldTypeDef.Methods.ToDictionary(m => m.FullName, m => m);
-            var newMethodMap = newTypeDef.Methods.ToDictionary(m => m.FullName, m => m);
-
-            // 找出新增的方法
-            foreach (var (methodName, newMethodDef) in newMethodMap)
+            // 遍历 HookTypeInfoCache，收集有新增方法或字段的类型对应的文件
+            foreach (var (typeFullName, hookTypeInfo) in ReloadHelper.HookTypeInfoCache)
             {
-                if (!oldMethodMap.ContainsKey(methodName))
+                // 只处理当前程序集的类型
+                if (hookTypeInfo.AssemblyName != assemblyName)
+                    continue;
+
+                // 如果有一个方法或字段是添加的，就可以将整个类型加入
+                if (hookTypeInfo.ModifiedMethods.Values.Any(m => m.MemberModifyState == MemberModifyState.Added) || hookTypeInfo.ModifiedFields.Count > 0)
                 {
-                    diffResult.ModifiedMethods[methodName] = new MethodDiffInfo
-                    {
-                        FullName = methodName,
-                        ModifyState = MemberModifyState.Added,
-                        MethodDefinition = newMethodDef
-                    };
-                    _logger.LogDebug($"发现新增的方法: {methodName}");
+                    compileFiles.Add(typeFullName);
                 }
             }
+            
+            // 收集改动类型对应的文件路径
+            var allFiles = TypeInfoHelper.GetFilesFromTypes(compileFiles);
 
-            // 找出修改的方法
-            foreach (var (methodName, oldMethodDef) in oldMethodMap)
+            // 解析语法树 + 重命名扩展方法类
+            var syntaxTrees = new List<SyntaxTree>();
+            var extensionRename = new ExtensionClassRename();
+
+            foreach (var file in allFiles)
             {
-                if (!newMethodMap.TryGetValue(methodName, out var newMethodDef))
+                var tree = TypeInfoHelper.GetSyntaxTree(file);
+                if (tree == null) continue;
+
+                var newRoot = extensionRename.Visit(tree.GetRoot());
+                syntaxTrees.Add(tree.WithRootAndOptions(newRoot, tree.Options));
+            }
+
+            // 注入 IgnoresAccessChecksToAttribute
+            syntaxTrees.Add(CreateIgnoreAccessibilityTree(assemblyName, ReloadHelper.ParseOptions));
+
+            // 创建 Compilation 并 Emit
+            var patchAssemblyName = ReloadHelper.GetWrapperAssemblyName(assemblyName);
+            var compilation = CSharpCompilation.Create(
+                patchAssemblyName,
+                syntaxTrees,
+                ReloadHelper.GetMetadataReferences(assemblyName),
+                CreateIgnoreAccessibilityOptions(ReloadHelper.AssemblyContext[assemblyName].AllowUnsafeCode)
+            );
+
+            var filePath = Path.Combine(ReloadHelper.AssemblyOutputTempPath, $"{patchAssemblyName}.dll");
+            var pdbPath = Path.Combine(ReloadHelper.AssemblyOutputTempPath, $"{patchAssemblyName}.pdb");
+            var emitResult = compilation.Emit(filePath, pdbPath);
+
+            if (!emitResult.Success)
+            {
+                var errors = string.Join("\n", emitResult.Diagnostics
+                    .Where(d => d.Severity == DiagnosticSeverity.Error)
+                    .Select(d => d.ToString()));
+                throw new Exception($"编译失败:\n{errors}");
+            }
+
+            var assemblyDef = AssemblyDefinition.ReadAssembly(filePath, ReloadHelper.READER_PARAMETERS);
+
+            return assemblyDef;
+        }
+
+        /// <summary>
+        /// 生成 IgnoresAccessChecksToAttribute 的语法树
+        /// </summary>
+        private SyntaxTree CreateIgnoreAccessibilityTree(string targetAssemblyName, CSharpParseOptions parseOptions)
+        {
+            var code = $@"
+using System;
+
+[assembly: System.Runtime.CompilerServices.IgnoresAccessChecksTo(""{targetAssemblyName}"")]
+
+namespace System.Runtime.CompilerServices
+{{
+    [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]
+    internal sealed class IgnoresAccessChecksToAttribute : Attribute
+    {{
+        public IgnoresAccessChecksToAttribute(string assemblyName) => AssemblyName = assemblyName;
+        public string AssemblyName {{ get; }}
+    }}
+}}";
+            return CSharpSyntaxTree.ParseText(code, parseOptions);
+        }
+
+        /// <summary>
+        /// 创建忽略访问检查的编译选项
+        /// </summary>
+        private CSharpCompilationOptions CreateIgnoreAccessibilityOptions(bool allowUnsafe)
+        {
+            var options = new CSharpCompilationOptions(
+                OutputKind.DynamicallyLinkedLibrary,
+                optimizationLevel: OptimizationLevel.Debug,
+                allowUnsafe: allowUnsafe,
+                metadataImportOptions: MetadataImportOptions.All
+            );
+
+            // 通过反射设置 TopLevelBinderFlags.IgnoreAccessibility
+            var topLevelBinderFlagsProperty = typeof(CSharpCompilationOptions)
+                .GetProperty("TopLevelBinderFlags", BindingFlags.Instance | BindingFlags.NonPublic);
+            topLevelBinderFlagsProperty?.SetValue(options, (uint)(1 << 22));
+
+            return options;
+        }
+
+        /// <summary>
+        /// 比较编译出来的程序集中的类型和原有类型，找出其中添加、删除、修改的方法
+        /// </summary>
+        /// <param name="assemblyName">程序集名称</param>
+        /// <param name="changedTypes">改动文件中的类型集合</param>
+        /// <param name="patchAssemblyDef"></param>
+        /// <param name="allDiffResults"></param>
+        private void DiffAssembly(string assemblyName, HashSet<string> changedTypes, AssemblyDefinition patchAssemblyDef, Dictionary<string, DiffResult> allDiffResults)
+        {
+            if (patchAssemblyDef == null)
+            {
+                _logger.LogError($"无法获取新程序集 {assemblyName}");
+                return;
+            }
+
+            // 读取原始程序集（Unity 编译的完整版本）
+            using var originalAssembly = ReloadHelper.GetOriginalAssembly(assemblyName);
+            if (originalAssembly == null)
+            {
+                _logger.LogError($"无法获取原始程序集: {assemblyName}");
+                return;
+            }
+
+            // 对比改动文件中的类型
+            foreach (var typeFullName in changedTypes)
+            {
+                var newTypeDef = patchAssemblyDef.MainModule.GetType(typeFullName);
+                var originalTypeDef = originalAssembly.MainModule.GetType(typeFullName);
+
+                DiffResult diffResult = new DiffResult()
                 {
-                    continue;
+                    AssemblyName = assemblyName,
+                    AssemblyDef = patchAssemblyDef
+                };
+                
+                // 只有当 HookTypeInfoCache 和 originalAssembly 中都不存在该类型时才识别为新增类型
+                if (originalTypeDef == null && !ReloadHelper.HookTypeInfoCache.ContainsKey(typeFullName))
+                {
+                    // 新增类型，记录所有方法和字段
+                    foreach (var method in newTypeDef.Methods)
+                    {
+                        if (!method.IsConstructor && !method.IsGetter && !method.IsSetter)
+                        {
+                            diffResult.AddModifiedMethod(method, MemberModifyState.Added);
+                        }
+                    }
+
+                    foreach (var field in newTypeDef.Fields)
+                    {
+                        diffResult.AddModifiedField(typeFullName, field.FullName);
+                    }
+                }
+                else
+                {
+                    // 对比类型差异
+                    CompareTypesWithCecil(typeFullName, originalTypeDef, newTypeDef, diffResult);
                 }
 
-                // 比较方法体是否改变（返回 false 表示有变化）
-                if (!CompareMethodDefinitions(oldMethodDef, newMethodDef))
+                if (diffResult.ModifiedMethods.Count > 0 || diffResult.ModifiedFields.Count > 0)
                 {
-                    diffResult.ModifiedMethods[methodName] = new MethodDiffInfo
-                    {
-                        FullName = methodName,
-                        ModifyState = MemberModifyState.Modified,
-                        MethodDefinition = newMethodDef
-                    };
+                    allDiffResults[typeFullName] = diffResult;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 使用 Mono.Cecil 比较两个类型的方法差异
+        /// </summary>
+        /// <param name="typeFullName">类型全名</param>
+        /// <param name="originalTypeDef">原类型定义</param>
+        /// <param name="modifyTypeDef">新类型定义</param>
+        /// <param name="diffResult"></param>
+        /// <returns>差异结果</returns>
+        private void CompareTypesWithCecil(string typeFullName, TypeDefinition originalTypeDef, TypeDefinition modifyTypeDef, DiffResult diffResult)
+        {
+            var hookTypeInfo = ReloadHelper.HookTypeInfoCache.GetValueOrDefault(typeFullName);
+            
+            CompareMethod(originalTypeDef, modifyTypeDef, diffResult);
+
+            CompareField(originalTypeDef, modifyTypeDef, hookTypeInfo, diffResult);
+        }
+
+        private void CompareMethod(TypeDefinition originalTypeDef, TypeDefinition modifyTypeDef, DiffResult diffResult)
+        {
+            // 创建方法签名到方法的映射
+            var modifyMethodMap = modifyTypeDef.Methods.ToDictionary(m => m.FullName, m => m);
+
+            // 比较方法
+            foreach (var (methodName, methodDef) in modifyMethodMap)
+            {
+                MethodDefinition existingMethod = ReloadHelper.GetLatestMethodDefinition(modifyTypeDef.FullName, methodName, originalTypeDef);
+
+                // 没有改动记录且原类型中不存在，则认为是新增方法
+                if (existingMethod == null)
+                {
+                    diffResult.AddModifiedMethod(methodDef, MemberModifyState.Added);
+                    _logger.LogDebug($"发现新增的方法: {methodName}");
+                    continue;
+                }
+                
+                // 比较方法体是否改变（返回 false 表示有变化）
+                if (!CompareMethodDefinitions(existingMethod, methodDef))
+                {
+                    diffResult.AddModifiedMethod(methodDef, MemberModifyState.Modified);
                     _logger.LogDebug($"发现修改的方法: {methodName}");
                 }
             }
-
+        }        
+        
+        private void CompareField(TypeDefinition originalTypeDef, TypeDefinition modifyTypeDef, HookTypeInfo hookTypeInfo, DiffResult diffResult)
+        {
             // 比较字段：找出新增的字段
-            var oldFieldMap = oldTypeDef.Fields.ToDictionary(f => f.FullName, f => f);
-            var newFieldMap = newTypeDef.Fields.ToDictionary(f => f.FullName, f => f);
+            var oldFieldMap = originalTypeDef.Fields.ToDictionary(f => f.FullName, f => f);
+            var modifyFieldMap = modifyTypeDef.Fields.ToDictionary(f => f.FullName, f => f);
 
-            foreach (var (fieldName, newFieldDef) in newFieldMap)
+            foreach (var (fieldName, modifyFieldDef) in modifyFieldMap)
             {
-                if (!oldFieldMap.ContainsKey(fieldName))
+                if (!oldFieldMap.ContainsKey(fieldName) && !hookTypeInfo.ModifiedFields.ContainsKey(fieldName))
                 {
                     // 发现新增字段
-                    diffResult.AddedFields[newFieldDef.FullName] = new FieldDiffInfo
-                    {
-                        FullName = newFieldDef.FullName,
-                        DeclaringTypeFullName = typeFullName
-                    };
-                    _logger.LogDebug($"发现新增的字段: {newFieldDef.FullName}");
+                    diffResult.AddModifiedField(modifyFieldDef.DeclaringType.FullName, modifyFieldDef.FullName);
+                    _logger.LogDebug($"发现新增的字段: {modifyFieldDef.FullName}");
                 }
             }
-
-            return diffResult;
         }
 
         /// <summary>
@@ -452,8 +539,8 @@ namespace CompileServer.Services
             if (TypeInfoHelper.IsTaskCallStartMethod(existingMethodRef))
             {
                 // 查找状态机类型的 MoveNext 方法
-                var existingMoveNext = TypeInfoHelper.FindTaskCallMethod(existingMethodRef);
-                var newMoveNext = TypeInfoHelper.FindTaskCallMethod(newMethodRef);
+                var existingMoveNext = TypeInfoHelper.GetTaskCallMethod(existingMethodRef);
+                var newMoveNext = TypeInfoHelper.GetTaskCallMethod(newMethodRef);
 
                 // 比较 MoveNext 方法定义
                 var res = CompareMethodDefinitions(existingMoveNext, newMoveNext);

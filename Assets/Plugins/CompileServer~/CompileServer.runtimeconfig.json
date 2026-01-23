@@ -13,7 +13,6 @@
     ],
     "configProperties": {
       "System.GC.Server": false,
-      "System.Reflection.Metadata.MetadataUpdater.IsSupported": false,
       "System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization": false
     }
   }

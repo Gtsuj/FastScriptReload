@@ -14,28 +14,31 @@ public enum MemberModifyState
     Modified,
 }
 
-public interface IHookMemberInfo
+public abstract class HookMemberInfo
 {
-    public string AssemblyPath { get; set; }
-
-    public string TypeFullName { get; set; }
-
-    public string MemberFullName { get; set; }
+    public string AssemblyPath => HistoricalHookedAssemblyPaths.Last();
     
-    public MemberModifyState MemberModifyState { get; set; }
+    public List<string> HistoricalHookedAssemblyPaths { get; } = new();
+
+    public string TypeName;
+
+    public string MemberFullName;
+    
+    public MemberModifyState MemberModifyState;
+
+    public HookMemberInfo() { }
+    
+    public HookMemberInfo(string typeName, string fieldName, MemberModifyState state)
+    {
+        TypeName = typeName;
+        MemberFullName = fieldName;
+        MemberModifyState = state;
+    }
 }
 
 [Serializable]
-public class HookMethodInfo : IHookMemberInfo
+public class HookMethodInfo : HookMemberInfo
 {
-    public string AssemblyPath { get; set; }
-
-    public string TypeFullName { get; set; }
-
-    public string MemberFullName { get; set; }
-
-    public MemberModifyState MemberModifyState { get; set; }
-
     /// <summary>
     /// 封装过后的静态方法名称
     /// </summary>
@@ -50,7 +53,7 @@ public class HookMethodInfo : IHookMemberInfo
     /// 当前方法信息
     /// </summary>
     [JsonIgnore]
-    public MethodDefinition WrapperMethodDef { get; set; }
+    public MethodDefinition WrapperMethodDef;
 
     /// <summary>
     /// 历史Hook的方法列表（当新增方法被修改时，需要将这些方法重新Hook到新版本）
@@ -58,15 +61,14 @@ public class HookMethodInfo : IHookMemberInfo
     [JsonIgnore]
     public List<MethodBase> HistoricalHookedMethods { get; } = new();
 
-    public List<string> HistoricalHookedAssemblyPaths { get; } = new();
-
-    public HookMethodInfo(string hookMethodName, MethodDefinition wrapperMethodDef, MemberModifyState memberModifyState)
+    public HookMethodInfo() { }
+    
+    public HookMethodInfo(string hookMethodName, MethodDefinition wrapperMethodDef, MemberModifyState state) : 
+        base(wrapperMethodDef.DeclaringType.FullName, hookMethodName, state)
     {
-        MemberFullName = hookMethodName;
         WrapperMethodDef = wrapperMethodDef;
-        TypeFullName = wrapperMethodDef?.DeclaringType.FullName;
-        HasGenericParameters = wrapperMethodDef?.HasGenericParameters ?? false;
-        MemberModifyState = memberModifyState;
+        WrapperMethodName = wrapperMethodDef.FullName;
+        HasGenericParameters = wrapperMethodDef.HasGenericParameters;
     }
 
     [OnDeserialized]
@@ -77,56 +79,29 @@ public class HookMethodInfo : IHookMemberInfo
             return;
         }
 
-        using var assemblyDefinition = AssemblyDefinition.ReadAssembly(AssemblyPath);
-        if (string.IsNullOrEmpty(TypeFullName) || string.IsNullOrEmpty(WrapperMethodName))
+        if (string.IsNullOrEmpty(TypeName) || string.IsNullOrEmpty(WrapperMethodName))
         {
             return;
         }
 
-        var typeDef = assemblyDefinition.MainModule.GetType(TypeFullName);
-        if (typeDef == null)
+        for (int i = 0; i < HistoricalHookedAssemblyPaths.Count; i++)
         {
-            return;
-        }
-
-        WrapperMethodDef = typeDef.Methods.FirstOrDefault(m => m.FullName == WrapperMethodName);
-
-        if (HistoricalHookedAssemblyPaths.Count > 1)
-        {
-            HistoricalHookedAssemblyPaths.RemoveAt(HistoricalHookedAssemblyPaths.Count - 1);
-            for (int i = 0; i < HistoricalHookedAssemblyPaths.Count; i++)
+            var hookedAssemblyPath = HistoricalHookedAssemblyPaths[i];
+            var assembly = Assembly.LoadFrom(hookedAssemblyPath);
+            var type = assembly.GetType(TypeName);
+            var method = type?.GetMethodByMethodDefName(WrapperMethodName);
+            if (method != null)
             {
-                var hookedAssemblyPath = HistoricalHookedAssemblyPaths[i];
-                var assembly = Assembly.LoadFrom(hookedAssemblyPath);
-                var type = assembly.GetType(TypeFullName);
-                var method = type?.GetMethodByMethodDefName(WrapperMethodName);
-                if (method != null)
-                {
-                    HistoricalHookedMethods.Add(method);
-                }
+                HistoricalHookedMethods.Add(method);
             }
         }
     }
-
-    public void AddHistoricalHookedMethod(MethodBase methodBase)
-    {
-        HistoricalHookedMethods.Add(methodBase);
-    }
 }
 
-public class HookFieldInfo : IHookMemberInfo
+public class HookFieldInfo : HookMemberInfo
 {
-    public string AssemblyPath { get; set; }
-
-    public string TypeFullName { get; set; }
-
-    public string MemberFullName { get; set; }
-
-    public MemberModifyState MemberModifyState { get; set; } = MemberModifyState.Added;
-
-    public HookFieldInfo(FieldDefinition fieldDef)
+    public HookFieldInfo(string typeName, string fieldName, MemberModifyState state = MemberModifyState.Added) : base(typeName, fieldName, state)
     {
-        TypeFullName = fieldDef?.DeclaringType.FullName;
-        MemberFullName = fieldDef?.FullName;
+        
     }
 }

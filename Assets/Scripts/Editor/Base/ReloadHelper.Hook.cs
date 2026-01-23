@@ -4,7 +4,6 @@ using System.Reflection;
 using HarmonyLib;
 using HookInfo.Models;
 using ImmersiveVrToolsCommon.Runtime.Logging;
-using Newtonsoft.Json;
 
 namespace FastScriptReload.Editor
 {
@@ -80,6 +79,13 @@ namespace FastScriptReload.Editor
                 }
 
                 MethodHelper.DisableVisibilityChecks(wrapperMethod);
+                foreach (var nestedType in wrapperType.GetNestedTypes(AccessTools.allDeclared))
+                {
+                    foreach (var nestedMethod in nestedType.GetMethods(AccessTools.allDeclared))
+                    {
+                        MethodHelper.DisableVisibilityChecks(nestedMethod);
+                    }
+                }
 
                 if (modifiedMethod.MemberModifyState == MemberModifyState.Added)
                 {
@@ -94,8 +100,9 @@ namespace FastScriptReload.Editor
 
         private static void AddedMethodHookHandle(string methodName, HookMethodInfo modifiedMethod, MethodBase wrapperMethod)
         {
-            foreach (var historicalMethod in modifiedMethod.HistoricalHookedMethods)
+            for (int i = 0; i < modifiedMethod.HistoricalHookedMethods.Count - 1; i++)
             {
+                var historicalMethod = modifiedMethod.HistoricalHookedMethods[i];
                 if (historicalMethod.Equals(wrapperMethod))
                 {
                     return;
@@ -103,7 +110,7 @@ namespace FastScriptReload.Editor
                 Hook(methodName, historicalMethod, wrapperMethod);
             }
 
-            if (modifiedMethod.HistoricalHookedMethods.Count == 0)
+            if (modifiedMethod.HistoricalHookedMethods.Count == 1)
             {
                 FastScriptReloadHookDetailsWindow.NotifyMemberHooked(methodName, true);
             }

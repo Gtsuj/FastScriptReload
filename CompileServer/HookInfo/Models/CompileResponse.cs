@@ -19,7 +19,7 @@ namespace HookInfo.Models
         /// Key: 类型完整名称
         /// Value: Hook 类型信息
         /// </summary>
-        public Dictionary<string, HookTypeInfo> HookTypeInfos { get; set; } = new Dictionary<string, HookTypeInfo>();
+        public Dictionary<string, HookTypeInfo> HookTypeInfos { get; set; } = new ();
         
         /// <summary>
         /// 错误消息（编译失败时）
@@ -30,10 +30,5 @@ namespace HookInfo.Models
         /// 编译耗时（毫秒）
         /// </summary>
         public long ElapsedMilliseconds { get; set; }
-        
-        /// <summary>
-        /// 是否来自缓存
-        /// </summary>
-        public bool IsFromCache { get; set; }
     }
 }

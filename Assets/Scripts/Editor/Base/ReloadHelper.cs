@@ -190,7 +190,7 @@ namespace FastScriptReload.Editor
                 LoggerScoped.LogDebug("CompileServer 已停止");
             }
 
-            CompilationPipeline.RequestScriptCompilation();
+            // CompilationPipeline.RequestScriptCompilation();
         }
     }
 }
