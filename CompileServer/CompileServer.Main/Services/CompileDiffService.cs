@@ -158,10 +158,13 @@ namespace CompileServer.Services
                 var errors = string.Join("\n", emitResult.Diagnostics
                     .Where(d => d.Severity == DiagnosticSeverity.Error)
                     .Select(d => d.ToString()));
-                throw new Exception($"编译失败:\n{errors}");
+                throw new Exception(errors);
             }
 
             var assemblyDef = AssemblyDefinition.ReadAssembly(filePath, ReloadHelper.READER_PARAMETERS);
+
+            // 移除扩展方法名中的 __Patch__ 后缀
+            ExtensionMethodRenameRemover.RemovePatchSuffix(assemblyDef);
 
             return assemblyDef;
         }
@@ -513,7 +516,7 @@ namespace System.Runtime.CompilerServices
                 return false;
             }
 
-            if (existingMethodDef.DeclaringType.IsNested)
+            if (existingMethodDef.DeclaringType.IsNested && TypeInfoHelper.IsCompilerGeneratedType(existingMethodDef.DeclaringType))
             {
                 return CompareMethodDefinitions(existingMethodDef, newMethodDef);
             }

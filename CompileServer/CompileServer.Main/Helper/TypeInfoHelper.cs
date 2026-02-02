@@ -474,13 +474,14 @@ namespace CompileServer.Helper
         }        
 
         /// <summary>
-        /// 获取类型名（支持嵌套类型）
+        /// 获取类型名
         /// </summary>
         private static string GetTypeFullName(TypeDeclarationSyntax typeDecl)
         {
             if (typeDecl == null)
                 return string.Empty;
 
+            // 构建嵌套类型名
             var parts = new List<string>();
             var current = typeDecl;
 
@@ -490,23 +491,32 @@ namespace CompileServer.Helper
                 current = current.Parent as TypeDeclarationSyntax;
             }
 
-            var namespaceDecl = typeDecl.Parent;
-            while (namespaceDecl != null && !(namespaceDecl is BaseNamespaceDeclarationSyntax))
+            // 直接拼接所有嵌套的命名空间
+            var builder = new StringBuilder();
+            var parent = typeDecl.Parent;
+            var hasNamespace = false;
+            
+            while (parent != null)
             {
-                namespaceDecl = namespaceDecl.Parent;
+                if (parent is BaseNamespaceDeclarationSyntax namespaceDecl)
+                {
+                    if (hasNamespace)
+                    {
+                        builder.Insert(0, '.');
+                    }
+                    builder.Insert(0, namespaceDecl.Name.ToString());
+                    hasNamespace = true;
+                }
+                parent = parent.Parent;
             }
 
-            var namespaceName = (namespaceDecl as BaseNamespaceDeclarationSyntax)?.Name.ToString() ?? string.Empty;
-
-            if (string.IsNullOrEmpty(namespaceName))
+            // 拼接类型名
+            if (hasNamespace)
             {
-                return string.Join("/", parts);
+                builder.Append('.');
             }
-
-            var builder = new StringBuilder(namespaceName.Length + parts.Count * 20);
-            builder.Append(namespaceName);
-            builder.Append('.');
             builder.Append(string.Join("/", parts));
+
             return builder.ToString();
         }
 
