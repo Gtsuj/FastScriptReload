@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
     <PropertyGroup>
         <OutputType>Exe</OutputType>
@@ -8,6 +8,20 @@
         <ServerGarbageCollection>false</ServerGarbageCollection>
         <!-- 与 Unity 项目保持一致，不启用可空引用类型 -->
         <!-- <Nullable>enable</Nullable> -->
+        
+        <!-- 发布配置：单文件模式，包含 .NET 8 运行时 -->
+        <PublishSingleFile>true</PublishSingleFile>
+        <SelfContained>true</SelfContained>
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+        <IncludeNativeLibrariesForSelfContained>true</IncludeNativeLibrariesForSelfContained>
+        <PublishReadyToRun>false</PublishReadyToRun>
+        <!-- 包含 PDB 文件用于调试 -->
+        <DebugType>embedded</DebugType>
+        <DebugSymbols>true</DebugSymbols>
+        <!-- 启用压缩以减小文件大小 -->
+        <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+        <!-- 将所有依赖打包进单文件，包括 HookInfo -->
+        <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     </PropertyGroup>
 
     <ItemGroup>
@@ -28,30 +42,46 @@
       <ProjectReference Include="..\HookInfo.Runtime\HookInfo.Runtime.csproj" />
     </ItemGroup>
 
-    <!-- 构建后自动复制到 Unity 项目 -->
-    <Target Name="CopyToUnity" AfterTargets="Build">
+    <!-- 发布后自动复制到 Unity 项目（仅在 Publish 时执行） -->
+    <Target Name="CopyToUnity" AfterTargets="Publish">
         <PropertyGroup>
             <UnityPluginPath>$(ProjectDir)..\..\Assets\Plugins\CompileServer~\</UnityPluginPath>
+            <!-- 发布输出目录 -->
+            <PublishDir>$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</PublishDir>
         </PropertyGroup>
-        <MakeDir Directories="$(UnityPluginPath)" />
-        <!-- 复制主程序exe文件 -->
-        <Copy SourceFiles="$(TargetDir)$(TargetName).exe" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).exe')" />
-        <!-- 复制主程序dll文件（如果存在） -->
-        <Copy SourceFiles="$(TargetDir)$(TargetName).dll" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).dll')" />
-        <!-- 复制PDB文件（用于调试） -->
-        <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
-        <!-- 复制运行时配置文件 -->
-        <Copy SourceFiles="$(TargetDir)$(TargetName).runtimeconfig.json" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).runtimeconfig.json')" />
-        <Copy SourceFiles="$(TargetDir)$(TargetName).deps.json" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)$(TargetName).deps.json')" />
-        <!-- 复制所有依赖的DLL文件 -->
+        
+        <Message Text="🔄 开始复制发布文件到 Unity..." Importance="high" />
+        
+        <!-- 清理目标目录中的旧文件 -->
         <ItemGroup>
-            <RuntimeFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)$(TargetName).dll" />
+            <OldFiles Include="$(UnityPluginPath)*.*" />
         </ItemGroup>
-        <Copy SourceFiles="@(RuntimeFiles)" DestinationFolder="$(UnityPluginPath)" />
-        <!-- 复制 HookInfo 与 HookInfo.Runtime 的 PDB（用于调试） -->
-        <Copy SourceFiles="$(TargetDir)HookInfo.pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)HookInfo.pdb')" />
-        <Copy SourceFiles="$(TargetDir)HookInfo.Runtime.pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(TargetDir)HookInfo.Runtime.pdb')" />
-        <Message Text="✅ Copied CompileServer to Unity: $(UnityPluginPath)" Importance="high" />
+        <Delete Files="@(OldFiles)" />
+        
+        <!-- 创建目标目录 -->
+        <MakeDir Directories="$(UnityPluginPath)" />
+        
+        <!-- 复制单文件发布的可执行文件（包含 .NET 8 运行时和所有依赖） -->
+        <Copy SourceFiles="$(PublishDir)$(TargetName).exe" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)$(TargetName).exe')" />
+        
+        <!-- 复制 PDB 文件（如果存在，用于调试） -->
+        <Copy SourceFiles="$(PublishDir)$(TargetName).pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)$(TargetName).pdb')" />
+        
+        <!-- 注意：HookInfo.dll 和 HookInfo.Runtime.dll 已经打包进 exe，不需要单独复制到 CompileServer~ -->
+        
+        <!-- 复制 HookInfo 到 Unity Plugins 根目录（Unity 端需要引用） -->
+        <PropertyGroup>
+            <UnityPluginRootPath>$(ProjectDir)..\..\Assets\Plugins\CompileServer\</UnityPluginRootPath>
+        </PropertyGroup>
+        <MakeDir Directories="$(UnityPluginRootPath)" />
+        <Copy SourceFiles="$(PublishDir)HookInfo.dll" DestinationFolder="$(UnityPluginRootPath)" Condition="Exists('$(PublishDir)HookInfo.dll')" />
+        <Copy SourceFiles="$(PublishDir)HookInfo.pdb" DestinationFolder="$(UnityPluginRootPath)" Condition="Exists('$(PublishDir)HookInfo.pdb')" />
+        <Copy SourceFiles="$(PublishDir)HookInfo.Runtime.dll" DestinationFolder="$(UnityPluginRootPath)" Condition="Exists('$(PublishDir)HookInfo.Runtime.dll')" />
+        <Copy SourceFiles="$(PublishDir)HookInfo.Runtime.pdb" DestinationFolder="$(UnityPluginRootPath)" Condition="Exists('$(PublishDir)HookInfo.Runtime.pdb')" />
+        
+        <Message Text="✅ 已复制自包含单文件版本到 Unity: $(UnityPluginPath)" Importance="high" />
+        <Message Text="   包含 .NET 8 运行时，无需安装 .NET" Importance="high" />
+        <Message Text="✅ 已复制 HookInfo 程序集到: $(UnityPluginRootPath)" Importance="high" />
     </Target>
 
 </Project>

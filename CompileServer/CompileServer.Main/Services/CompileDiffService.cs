@@ -151,14 +151,22 @@ namespace CompileServer.Services
 
             var filePath = Path.Combine(ReloadHelper.AssemblyOutputTempPath, $"{patchAssemblyName}.dll");
             var pdbPath = Path.Combine(ReloadHelper.AssemblyOutputTempPath, $"{patchAssemblyName}.pdb");
-            var emitResult = compilation.Emit(filePath, pdbPath);
 
-            if (!emitResult.Success)
             {
-                var errors = string.Join("\n", emitResult.Diagnostics
-                    .Where(d => d.Severity == DiagnosticSeverity.Error)
-                    .Select(d => d.ToString()));
-                throw new Exception(errors);
+                using var dllStream = new FileStream(filePath, FileMode.Create, FileAccess.Write);
+                using var pdbStream = new FileStream(pdbPath, FileMode.Create, FileAccess.Write);
+                
+                var emitOptions = new EmitOptions(debugInformationFormat: DebugInformationFormat.PortablePdb);
+                var emitResult = compilation.Emit(dllStream, pdbStream, options: emitOptions);
+
+                if (!emitResult.Success)
+                {
+                    var errors = string.Join("\n", emitResult.Diagnostics
+                        .Where(d => d.Severity == DiagnosticSeverity.Error)
+                        .Select(d => d.ToString()));
+
+                    throw new Exception(errors);
+                }
             }
 
             var assemblyDef = AssemblyDefinition.ReadAssembly(filePath, ReloadHelper.READER_PARAMETERS);
