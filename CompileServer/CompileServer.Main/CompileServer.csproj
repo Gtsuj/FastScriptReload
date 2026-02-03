@@ -8,21 +8,13 @@
         <ServerGarbageCollection>false</ServerGarbageCollection>
         <!-- 与 Unity 项目保持一致，不启用可空引用类型 -->
         <!-- <Nullable>enable</Nullable> -->
-        
-        <!-- 发布配置：单文件模式，包含 .NET 8 运行时 -->
-        <PublishSingleFile>true</PublishSingleFile>
-        <SelfContained>true</SelfContained>
-        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-        <IncludeNativeLibrariesForSelfContained>true</IncludeNativeLibrariesForSelfContained>
-        <PublishReadyToRun>false</PublishReadyToRun>
-        <!-- 包含 PDB 文件用于调试 -->
-        <DebugType>embedded</DebugType>
-        <DebugSymbols>true</DebugSymbols>
-        <!-- 启用压缩以减小文件大小 -->
-        <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-        <!-- 将所有依赖打包进单文件，包括 HookInfo -->
-        <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     </PropertyGroup>
+    
+    <!-- 
+        发布配置：通过命令行参数启用
+        使用方式: dotnet publish -c Release /p:PublishSingleFile=true
+        或使用 publish.bat 脚本
+    -->
 
     <ItemGroup>
       <!-- Roslyn 编译器 -->
@@ -64,10 +56,12 @@
         <!-- 复制单文件发布的可执行文件（包含 .NET 8 运行时和所有依赖） -->
         <Copy SourceFiles="$(PublishDir)$(TargetName).exe" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)$(TargetName).exe')" />
         
-        <!-- 复制 PDB 文件（如果存在，用于调试） -->
+        <!-- 复制所有 PDB 文件（用于调试错误堆栈跟踪） -->
         <Copy SourceFiles="$(PublishDir)$(TargetName).pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)$(TargetName).pdb')" />
+        <Copy SourceFiles="$(PublishDir)HookInfo.pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)HookInfo.pdb')" />
+        <Copy SourceFiles="$(PublishDir)HookInfo.Runtime.pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)HookInfo.Runtime.pdb')" />
         
-        <!-- 注意：HookInfo.dll 和 HookInfo.Runtime.dll 已经打包进 exe，不需要单独复制到 CompileServer~ -->
+        <!-- 注意：HookInfo.dll 和 HookInfo.Runtime.dll 已经打包进 exe，不需要单独复制 DLL -->
         
         <!-- 复制 HookInfo 到 Unity Plugins 根目录（Unity 端需要引用） -->
         <PropertyGroup>
