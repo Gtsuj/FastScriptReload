@@ -111,8 +111,19 @@ namespace CompileServer.Services
                     {
                         if (diffResult.ModifiedFields.ContainsKey(fieldDef.FullName))
                         {
-                            hookTypeInfo.ModifiedFields.TryAdd(fieldDef.FullName, new HookFieldInfo(typeName, fieldDef.FullName));
+                            var hookFieldInfo = new HookFieldInfo(typeName, fieldDef);
+                            hookTypeInfo.ModifiedFields.TryAdd(fieldDef.FullName, hookFieldInfo);
+                            
+                            // 添加字段到目标类型
                             targetTypeDef.Fields.Add(new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, wrapperAssemblyDef.MainModule)));
+                            
+                            // 生成字段初始化方法
+                            var initMethod = CreateFieldInitializerMethod(wrapperAssemblyDef, typeDef, fieldDef);
+                            if (initMethod != null)
+                            {
+                                // 设置InitializerMethodName
+                                hookFieldInfo.SetInitializerMethod(initMethod);
+                            }
                         }
                     }
 
@@ -1006,6 +1017,113 @@ namespace CompileServer.Services
             return false;
         }
 
+        #endregion
+
+        #region Private 方法 - 字段初始化
+
+        /// <summary>
+        /// 为新增字段创建初始化方法
+        /// 方法签名：public static TField __Init_{FieldName}__()
+        /// 注意：不需要 instance 参数，只返回字段的默认初始值
+        /// 返回字段的实际类型，运行时会转换为 Func<object>
+        /// 如果字段没有初始化逻辑，返回 null
+        /// </summary>
+        private MethodDefinition CreateFieldInitializerMethod(AssemblyDefinition wrapperAssemblyDef, TypeDefinition typeDef, FieldDefinition fieldDef)
+        {
+            var module = wrapperAssemblyDef.MainModule;
+            var targetTypeDef = ExtractTypeToAssembly(wrapperAssemblyDef, typeDef);
+            
+            // 方法名格式: <Init_{FieldName}>
+            var methodName = $"<Init_{fieldDef.Name}>";
+            var fieldType = GetOriginalType(fieldDef.FieldType, module);
+            
+            // 创建初始化方法（无参数，返回字段类型）
+            var initMethod = new MethodDefinition(
+                methodName,
+                MethodAttributes.Public | MethodAttributes.Static,
+                fieldType
+            )
+            {
+                ImplAttributes = MethodImplAttributes.NoInlining
+            };
+            
+            // 从原类型的构造函数或字段初始化器中提取初始化逻辑
+            bool hasInitLogic = ExtractFieldInitializationLogic(initMethod, typeDef, fieldDef);
+            
+            if (!hasInitLogic)
+            {
+                // 没有初始化逻辑，不生成初始化方法
+                return null;
+            }
+            
+            // 添加方法到类型
+            targetTypeDef.Methods.Add(initMethod);
+            
+            return initMethod;
+        }
+
+        /// <summary>
+        /// 从原类型构造函数中提取字段的初始化逻辑
+        /// 如果没有找到初始化逻辑，返回 null 表示不需要初始化方法
+        /// </summary>
+        private bool ExtractFieldInitializationLogic(MethodDefinition initMethod, TypeDefinition originalType, FieldDefinition fieldDef)
+        {
+            // 查找构造函数
+            var ctor = fieldDef.IsStatic 
+                ? originalType.Methods.FirstOrDefault(m => m.IsConstructor && m.IsStatic)
+                : originalType.Methods.FirstOrDefault(m => m.IsConstructor && !m.IsStatic);
+            
+            if (ctor == null || !ctor.HasBody)
+            {
+                // 没有构造函数，不生成初始化方法
+                return false;
+            }
+
+            // 查找字段初始化指令序列
+            var instructions = ctor.Body.Instructions;
+            for (int i = 0; i < instructions.Count; i++)
+            {
+                var inst = instructions[i];
+                if (inst.OpCode != OpCodes.Stfld && inst.OpCode != OpCodes.Stsfld)
+                {
+                    continue;
+                }
+
+                var fieldRef = inst.Operand as FieldReference;
+
+                if (fieldRef == null || fieldRef.FullName != fieldDef.FullName)
+                {
+                    continue;
+                }
+
+                for (int j = i - 1; j >= 0; j--)
+                {
+                    var prevInst = instructions[j];
+
+                    if (inst.OpCode == OpCodes.Stfld && prevInst.OpCode == OpCodes.Ldarg_0)
+                    {
+                        initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                        return true;
+                    }
+
+                    if (inst.OpCode == OpCodes.Stsfld && prevInst.OpCode == OpCodes.Stsfld)
+                    {
+                        initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                        return true;
+                    }
+
+                    initMethod.Body.Instructions.Insert(0, prevInst);
+
+                    if (j == 0)
+                    {
+                        initMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
         #endregion
     }
 }

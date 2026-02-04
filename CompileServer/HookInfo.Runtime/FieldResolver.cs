@@ -79,10 +79,9 @@ namespace HookInfo.Runtime
         /// 注册字段初始化器 - 使用固定初始值
         /// 当字段首次被访问时，会使用此值作为初始值
         /// </summary>
-        /// <typeparam name="TField">字段类型</typeparam>
         /// <param name="fieldName">字段名称</param>
         /// <param name="initialValue">初始值</param>
-        public static void RegisterFieldInitializer<TField>(string fieldName, TField initialValue)
+        public static void RegisterFieldInitializer(string fieldName, object initialValue)
         {
             if (string.IsNullOrEmpty(fieldName))
             {

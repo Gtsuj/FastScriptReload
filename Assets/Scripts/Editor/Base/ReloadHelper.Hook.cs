@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using HookInfo.Models;
+using HookInfo.Runtime;
 using ImmersiveVrToolsCommon.Runtime.Logging;
 
 namespace FastScriptReload.Editor
@@ -21,33 +22,48 @@ namespace FastScriptReload.Editor
         {
             foreach (var (typeFullName, hookTypeInfo) in hookTypeInfos)
             {
-                HookField(hookTypeInfo);
+                var originType = Type.GetType($"{typeFullName},{hookTypeInfo.AssemblyName}");
 
-                HookMethod(hookTypeInfo);
+                if (originType == null)
+                {
+                    var errorMsg = $"找不到要Hook的原类型查找: {typeFullName},{hookTypeInfo.AssemblyName}";
+                    LoggerScoped.LogError(errorMsg);
+                    FastScriptReloadHookDetailsWindow.NotifyHookFailed(errorMsg);
+                    return;
+                }
+
+                HookField(originType, hookTypeInfo);
+
+                HookMethod(originType, hookTypeInfo);
             }
         }
 
-        private static void HookField(HookTypeInfo hookTypeInfo)
+        private static void HookField(Type originType, HookTypeInfo hookTypeInfo)
         {
             foreach (var (name, fieldInfo) in hookTypeInfo.ModifiedFields)
             {
+                if (!string.IsNullOrEmpty(fieldInfo.InitializerMethodName))
+                {
+                    // 获取字段初始化方法
+                    var initializerMethod = LoadWrapperMethod(fieldInfo.AssemblyPath, fieldInfo.TypeName, fieldInfo.InitializerMethodName, out string errorMsg);
+                    if (initializerMethod == null)
+                    {
+                        LoggerScoped.LogError(errorMsg);
+                        FastScriptReloadHookDetailsWindow.NotifyMemberHooked(name, false, errorMsg);
+                        continue;
+                    }
+
+                    var initialValue = initializerMethod.Invoke(null, null);
+                    var registerFieldFunc = typeof(FieldResolver<>).MakeGenericType(originType).GetMethod("RegisterFieldInitializer");
+                    registerFieldFunc?.Invoke(null, new[] { fieldInfo.FieldName, initialValue });
+                }
+
                 FastScriptReloadHookDetailsWindow.NotifyMemberHooked(name, true);
             }
         }
 
-        private static void HookMethod(HookTypeInfo hookTypeInfo)
-        {
-            var typeFullName = hookTypeInfo.TypeFullName;
-            var originType = Type.GetType($"{typeFullName},{hookTypeInfo.AssemblyName}");
-
-            if (originType == null)
-            {
-                var errorMsg = $"找不到要Hook的原类型查找: {typeFullName},{hookTypeInfo.AssemblyName}";
-                LoggerScoped.LogError(errorMsg);
-                FastScriptReloadHookDetailsWindow.NotifyHookFailed(errorMsg);
-                return;
-            }
-            
+        private static void HookMethod(Type originType, HookTypeInfo hookTypeInfo)
+        {            
             foreach (var (methodName, modifiedMethod) in hookTypeInfo.ModifiedMethods)
             {
                 if (modifiedMethod.HasGenericParameters)
@@ -56,35 +72,14 @@ namespace FastScriptReload.Editor
                     continue;
                 }
 
-                var wrapperAssembly = Assembly.LoadFrom(modifiedMethod.AssemblyPath);
+                var wrapperMethod = LoadWrapperMethod(modifiedMethod.AssemblyPath, originType.FullName, modifiedMethod.WrapperMethodName,
+                out string errorMsg);
 
-                // 从 Wrapper 程序集中找到对应的类型
-                Type wrapperType = wrapperAssembly.GetType(originType.FullName);
-                if (wrapperType == null)
-                {
-                    var errorMsg = $"在 Wrapper 程序集中找不到类型: {typeFullName}";
-                    LoggerScoped.LogError(errorMsg);
-                    FastScriptReloadHookDetailsWindow.NotifyMemberHooked(modifiedMethod.WrapperMethodName, false, errorMsg);
-                    continue;
-                }
-
-                // 获取 Wrapper 类型中的所有静态方法（公有和私有）
-                var wrapperMethod = wrapperType.GetMethodByMethodDefName(modifiedMethod.WrapperMethodName);
                 if (wrapperMethod == null)
                 {
-                    var errorMsg = $"在 Wrapper 程序集中找不到方法 {modifiedMethod.WrapperMethodName}";
                     LoggerScoped.LogError(errorMsg);
                     FastScriptReloadHookDetailsWindow.NotifyMemberHooked(modifiedMethod.WrapperMethodName, false, errorMsg);
                     continue;
-                }
-
-                MethodHelper.DisableVisibilityChecks(wrapperMethod);
-                foreach (var nestedType in wrapperType.GetNestedTypes(AccessTools.allDeclared))
-                {
-                    foreach (var nestedMethod in nestedType.GetMethods(AccessTools.allDeclared))
-                    {
-                        MethodHelper.DisableVisibilityChecks(nestedMethod);
-                    }
                 }
 
                 if (modifiedMethod.MemberModifyState == MemberModifyState.Added)
@@ -96,6 +91,50 @@ namespace FastScriptReload.Editor
                     Hook(methodName, originType.GetMethodByMethodDefName(methodName), wrapperMethod);
                 }
             }
+        }
+
+        /// <summary>
+        /// 从指定的程序集路径加载 Wrapper 方法
+        /// </summary>
+        /// <param name="assemblyPath">程序集文件路径</param>
+        /// <param name="typeFullName">类型全名</param>
+        /// <param name="methodName">方法名</param>
+        /// <param name="errorMsg">错误信息(如果失败)</param>
+        /// <returns>找到的方法,失败则返回 null</returns>
+        private static MethodBase LoadWrapperMethod(string assemblyPath, string typeFullName, string methodName, out string errorMsg)
+        {
+            errorMsg = null;
+
+            // 加载程序集
+            var wrapperAssembly = Assembly.LoadFrom(assemblyPath);
+
+            // 从 Wrapper 程序集中找到对应的类型
+            Type wrapperType = wrapperAssembly.GetType(typeFullName);
+            if (wrapperType == null)
+            {
+                errorMsg = $"在 Wrapper 程序集中找不到类型: {typeFullName}";
+                return null;
+            }
+
+            // 获取 Wrapper 类型中的方法
+            var wrapperMethod = wrapperType.GetMethodByMethodDefName(methodName);
+            if (wrapperMethod == null)
+            {
+                errorMsg = $"在 Wrapper 程序集中找不到方法 {methodName}";
+                return null;
+            }
+
+            // 禁用可见性检查
+            MethodHelper.DisableVisibilityChecks(wrapperMethod);
+            foreach (var nestedType in wrapperType.GetNestedTypes(AccessTools.allDeclared))
+            {
+                foreach (var nestedMethod in nestedType.GetMethods(AccessTools.allDeclared))
+                {
+                    MethodHelper.DisableVisibilityChecks(nestedMethod);
+                }
+            }
+
+            return wrapperMethod;
         }
 
         private static void AddedMethodHookHandle(string methodName, HookMethodInfo modifiedMethod, MethodBase wrapperMethod)

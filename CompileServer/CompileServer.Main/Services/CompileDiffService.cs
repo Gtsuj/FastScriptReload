@@ -1,19 +1,12 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using System.Reflection;
-using System.Text;
 using CompileServer.Helper;
 using CompileServer.Models;
 using CompileServer.Rewriters;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
-using Mono.Cecil.Pdb;
 using HookInfo.Models;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Emit;
 
 namespace CompileServer.Services
@@ -336,7 +329,7 @@ namespace System.Runtime.CompilerServices
 
             foreach (var (fieldName, modifyFieldDef) in modifyFieldMap)
             {
-                if (!oldFieldMap.ContainsKey(fieldName) && !hookTypeInfo.ModifiedFields.ContainsKey(fieldName))
+                if (!oldFieldMap.ContainsKey(fieldName) && (hookTypeInfo == null || !hookTypeInfo.ModifiedFields.ContainsKey(fieldName)))
                 {
                     // 发现新增字段
                     diffResult.AddModifiedField(modifyFieldDef.DeclaringType.FullName, modifyFieldDef.FullName);

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -84,6 +84,11 @@ public class HookMethodInfo : HookMemberInfo
             return;
         }
 
+        if (MemberModifyState != MemberModifyState.Added)
+        {
+            return;
+        }
+
         for (int i = 0; i < HistoricalHookedAssemblyPaths.Count; i++)
         {
             var hookedAssemblyPath = HistoricalHookedAssemblyPaths[i];
@@ -100,8 +105,27 @@ public class HookMethodInfo : HookMemberInfo
 
 public class HookFieldInfo : HookMemberInfo
 {
-    public HookFieldInfo(string typeName, string fieldName, MemberModifyState state = MemberModifyState.Added) : base(typeName, fieldName, state)
+    public string FieldName;
+    
+    /// <summary>
+    /// 字段初始化方法的完整名称
+    /// 格式：ReturnType TypeFullName::<Init_{FieldName}>()
+    /// 在运行时通过反射从 Assembly 加载
+    /// </summary>
+    public string InitializerMethodName;
+
+    public HookFieldInfo() { }
+    
+    public HookFieldInfo(string typeName, FieldDefinition fieldDef, MemberModifyState state = MemberModifyState.Added) : base(typeName, fieldDef.FullName, state)
     {
-        
+        FieldName = fieldDef.Name;
+    }
+    
+    /// <summary>
+    /// 设置初始化方法名称
+    /// </summary>
+    public void SetInitializerMethod(MethodDefinition methodDef)
+    {
+        InitializerMethodName = methodDef?.FullName;
     }
 }
