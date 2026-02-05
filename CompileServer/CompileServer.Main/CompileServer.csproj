@@ -57,9 +57,9 @@
         <Copy SourceFiles="$(PublishDir)$(TargetName).exe" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)$(TargetName).exe')" />
         
         <!-- 复制所有 PDB 文件（用于调试错误堆栈跟踪） -->
-        <Copy SourceFiles="$(PublishDir)$(TargetName).pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)$(TargetName).pdb')" />
+        <!-- <Copy SourceFiles="$(PublishDir)$(TargetName).pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)$(TargetName).pdb')" />
         <Copy SourceFiles="$(PublishDir)HookInfo.pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)HookInfo.pdb')" />
-        <Copy SourceFiles="$(PublishDir)HookInfo.Runtime.pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)HookInfo.Runtime.pdb')" />
+        <Copy SourceFiles="$(PublishDir)HookInfo.Runtime.pdb" DestinationFolder="$(UnityPluginPath)" Condition="Exists('$(PublishDir)HookInfo.Runtime.pdb')" /> -->
         
         <!-- 注意：HookInfo.dll 和 HookInfo.Runtime.dll 已经打包进 exe，不需要单独复制 DLL -->
         

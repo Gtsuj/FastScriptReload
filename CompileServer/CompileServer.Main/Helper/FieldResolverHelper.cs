@@ -127,9 +127,11 @@ namespace CompileServer.Helpers
                 GenericArguments = { fieldType }
             };
 
-            var intPtrType = module.ImportReference(typeof(IntPtr));
+            // 返回类型应该是泛型参数 !0&
+            var genericParam = fieldHolderTypeRef.Resolve().GenericParameters[0];
+            var returnType = new ByReferenceType(genericParam);
 
-            var methodRef = new MethodReference("GetRef", intPtrType, fieldHolderGenericType)
+            var methodRef = new MethodReference("GetRef", returnType, fieldHolderGenericType)
             {
                 HasThis = true,
                 ExplicitThis = false,

@@ -108,7 +108,8 @@ namespace CompileServer.Services
                     continue;
 
                 // 如果有一个方法或字段是添加的，就可以将整个类型加入
-                if (hookTypeInfo.ModifiedMethods.Values.Any(m => m.MemberModifyState == MemberModifyState.Added) || hookTypeInfo.ModifiedFields.Count > 0)
+                if (hookTypeInfo.ModifiedMethods.Values.Any(m => m.MemberModifyState == MemberModifyState.Added) 
+                    || hookTypeInfo.ModifiedFields.Values.Any(m => m.MemberModifyState == MemberModifyState.Added))
                 {
                     compileFiles.Add(typeFullName);
                 }

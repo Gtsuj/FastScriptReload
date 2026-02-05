@@ -170,6 +170,19 @@ namespace CompileServer.Services
 
             foreach (var typeDef in module.Types)
             {
+                foreach (var nestedType in typeDef.NestedTypes)
+                {
+                    if (TypeInfoHelper.IsCompilerGeneratedType(nestedType))
+                    {
+                        continue;
+                    }
+
+                    foreach (var methodDef in nestedType.Methods)
+                    {
+                        HandleMethodInstruction(methodDef, module);
+                    }
+                }
+                
                 foreach (var methodDef in typeDef.Methods)
                 {
                     HandleMethodInstruction(methodDef, module);
@@ -345,18 +358,9 @@ namespace CompileServer.Services
             // 复制参数
             foreach (var originalParam in sourceMethodRef.Parameters)
             {
-                var newParam = new ParameterDefinition(
-                    originalParam.Name,
-                    originalParam.Attributes,
-                    GetOriginalType(originalParam.ParameterType, module, genericParameters));
-
-                // 复制默认值
-                if (originalParam.HasConstant)
-                {
-                    newParam.Constant = originalParam.Constant;
-                }
-
-                targetMethodRef.Parameters.Add(newParam);
+                originalParam.ParameterType = GetOriginalType(originalParam.ParameterType, module, genericParameters);
+                originalParam.Constant = originalParam.Constant;
+                targetMethodRef.Parameters.Add(originalParam);
             }
             
             if (sourceMethodRef is MethodDefinition sourceMethodDef && targetMethodRef is MethodDefinition targetMethodDef
@@ -365,7 +369,8 @@ namespace CompileServer.Services
                 // 局部变量引用处理
                 foreach (var variable in sourceMethodDef.Body.Variables)
                 {
-                    targetMethodDef.Body.Variables.Add(new VariableDefinition(GetOriginalType(variable.VariableType, module, genericParameters)));
+                    variable.VariableType = GetOriginalType(variable.VariableType, module, genericParameters);
+                    targetMethodDef.Body.Variables.Add(variable);
                 }
             }
         }
@@ -447,6 +452,9 @@ namespace CompileServer.Services
                 {
                     wrapperMethodDef.DebugInformation.SequencePoints.Add(sequencePoint);
                 }
+
+                // 复制作用域信息（包含局部变量的调试名称）
+                wrapperMethodDef.DebugInformation.Scope = methodDef.DebugInformation.Scope;
 
                 // 处理调试信息中的类型引用
                 HandleImportScope(wrapperMethodDef.DebugInformation?.Scope?.Import, module);
@@ -557,7 +565,10 @@ namespace CompileServer.Services
 
             foreach (var importTarget in import.Targets)
             {
-                importTarget.Type = GetOriginalType(importTarget.Type, moduleDef);
+                if (importTarget.Type != null)
+                {
+                    importTarget.Type = GetOriginalType(importTarget.Type, moduleDef);
+                }
             }
         }
 
@@ -854,7 +865,7 @@ namespace CompileServer.Services
                 return newGenericParameter;
             }
             
-            if (typeRef.IsNested && typeRef is TypeDefinition nestedTypeDef)
+            if (typeRef is TypeDefinition nestedTypeDef && TypeInfoHelper.IsCompilerGeneratedType(nestedTypeDef))
             {
                 return ExtractNestedTypeToAssembly(module.Assembly, nestedTypeDef);
             }

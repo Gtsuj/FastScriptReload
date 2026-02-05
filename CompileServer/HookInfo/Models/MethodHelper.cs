@@ -55,7 +55,7 @@ public static class MethodHelper
         StringBuilder sb = new();
         sb.Append(method.ReflectedType.FullName);
         sb.Append("::");
-        sb.Append(method.Name.Replace('+', '/'));
+        sb.Append(method.Name);
         sb.Append("(");
         var parameters = method.GetParameters();
         for (int i = 0; i < parameters.Length; i++)
@@ -69,11 +69,13 @@ public static class MethodHelper
             }
             else
             {
-                sb.Append(parameters[i].ParameterType.ToString());
+                sb.Append(parameters[i].ParameterType);
             }
         }
         sb.Append(")");
 
+        sb.Replace('+', '/');
+        
         return sb.ToString();
     }
 }
