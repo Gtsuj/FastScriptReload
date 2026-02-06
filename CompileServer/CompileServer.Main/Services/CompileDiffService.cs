@@ -134,6 +134,13 @@ namespace CompileServer.Services
             // 注入 IgnoresAccessChecksToAttribute
             syntaxTrees.Add(CreateIgnoreAccessibilityTree(assemblyName, ReloadHelper.ParseOptions));
 
+            // 注入 global using 语句
+            var globalUsingTree = CreateGlobalUsingTree(assemblyName, ReloadHelper.ParseOptions);
+            if (globalUsingTree != null)
+            {
+                syntaxTrees.Add(globalUsingTree);
+            }
+
             // 创建 Compilation 并 Emit
             var patchAssemblyName = ReloadHelper.GetWrapperAssemblyName(assemblyName);
             var compilation = CSharpCompilation.Create(
@@ -190,6 +197,21 @@ namespace System.Runtime.CompilerServices
         public string AssemblyName {{ get; }}
     }}
 }}";
+            return CSharpSyntaxTree.ParseText(code, parseOptions);
+        }
+
+        /// <summary>
+        /// 生成 global using 语句的语法树
+        /// </summary>
+        private SyntaxTree CreateGlobalUsingTree(string assemblyName, CSharpParseOptions parseOptions)
+        {
+            var globalUsings = TypeInfoHelper.GetGlobalUsings(assemblyName);
+            if (globalUsings == null || globalUsings.Count == 0)
+            {
+                return null;
+            }
+
+            var code = string.Join("\n", globalUsings);
             return CSharpSyntaxTree.ParseText(code, parseOptions);
         }
 

@@ -51,6 +51,12 @@ namespace CompileServer.Helper
         /// </summary>
         private static readonly ConcurrentDictionary<string, HashSet<string>> _typeToFiles = new();
 
+        /// <summary>
+        /// 每个程序集的 global using 语句列表
+        /// Key: 程序集名称, Value: global using 语句文本列表
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, List<string>> _assemblyGlobalUsings = new();
+
         #endregion
 
         #region 生命周期方法
@@ -78,8 +84,8 @@ namespace CompileServer.Helper
                     // 文件到程序集的映射缓存
                     foreach (var sourceFile in context.SourceFiles)
                     {
-                        BuildTypeIndex(sourceFile);
                         _fileToAssembly[sourceFile] = context.Name;
+                        BuildTypeIndex(sourceFile);
                     }
 
                     using var assemblyDef = AssemblyDefinition.ReadAssembly(context.OutputPath);
@@ -108,6 +114,7 @@ namespace CompileServer.Helper
             _fileToAssembly.Clear();
             _allTypesInNonDynamicGeneratedAssemblies.Clear();
             _typeToFiles.Clear();
+            _assemblyGlobalUsings.Clear();
 
             Console.WriteLine("已清除所有缓存和临时文件");
         }
@@ -122,6 +129,16 @@ namespace CompileServer.Helper
         public static string GetFileToAssemblyName(string filePath)
         {
             return _fileToAssembly.GetValueOrDefault(filePath);
+        }
+        
+        /// <summary>
+        /// 获取指定程序集的所有 global using 语句
+        /// </summary>
+        /// <param name="assemblyName">程序集名称</param>
+        /// <returns>global using 语句文本列表</returns>
+        public static List<string> GetGlobalUsings(string assemblyName)
+        {
+            return _assemblyGlobalUsings.GetValueOrDefault(assemblyName) ?? new List<string>();
         }
         
         /// <summary>
@@ -532,6 +549,28 @@ namespace CompileServer.Helper
             }
 
             var root = tree.GetRoot();
+            
+            // 提取 global using 语句
+            var globalUsings = root.DescendantNodes()
+                .OfType<UsingDirectiveSyntax>()
+                .Where(u => !u.GlobalKeyword.IsKind(SyntaxKind.None))
+                .Select(u => u.ToString())
+                .ToList();
+            
+            if (globalUsings.Count > 0)
+            {
+                var assemblyName = _fileToAssembly.GetValueOrDefault(sourceFile);
+                if (!string.IsNullOrEmpty(assemblyName))
+                {
+                    _assemblyGlobalUsings.AddOrUpdate(
+                        assemblyName,
+                        _ => new List<string>(globalUsings),
+                        (_, existing) => { existing.AddRange(globalUsings); return existing; }
+                    );
+                }
+            }
+            
+            // 构建类型索引
             foreach (var typeDecl in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
             {
                 var typeFullName = GetTypeFullName(typeDecl);
