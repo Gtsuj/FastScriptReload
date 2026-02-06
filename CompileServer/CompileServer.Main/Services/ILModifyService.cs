@@ -113,9 +113,15 @@ namespace CompileServer.Services
                         {
                             var hookFieldInfo = new HookFieldInfo(typeName, fieldDef);
                             hookTypeInfo.ModifiedFields.TryAdd(fieldDef.FullName, hookFieldInfo);
-                            
+
                             // 添加字段到目标类型
-                            targetTypeDef.Fields.Add(new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, wrapperAssemblyDef.MainModule)));
+                            var newField = new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, wrapperAssemblyDef.MainModule))
+                            {
+                                Constant = fieldDef.Constant,
+                                InitialValue = fieldDef.InitialValue
+                            };
+
+                            targetTypeDef.Fields.Add(newField);
                             
                             // 生成字段初始化方法
                             var initMethod = CreateFieldInitializerMethod(wrapperAssemblyDef, typeDef, fieldDef);
@@ -168,9 +174,9 @@ namespace CompileServer.Services
         {
             var module = wrapperAssemblyDef.MainModule;
 
-            foreach (var typeDef in module.Types)
+            foreach (var typeDef in module.Types.ToArray())
             {
-                foreach (var nestedType in typeDef.NestedTypes)
+                foreach (var nestedType in typeDef.NestedTypes.ToArray())
                 {
                     if (TypeInfoHelper.IsCompilerGeneratedType(nestedType))
                     {
@@ -285,42 +291,99 @@ namespace CompileServer.Services
         /// <summary>
         /// 将指定类型提取到目标程序集
         /// </summary>
-        private TypeDefinition ExtractTypeToAssembly(AssemblyDefinition wrapperAssemblyDef, TypeDefinition typeDef)
+        private TypeDefinition ExtractTypeToAssembly(AssemblyDefinition wrapperAssemblyDef, TypeDefinition typeDef, bool copyMembers = false)
         {
+            if (typeDef == null)
+            {
+                return null;
+            }
+
             var module = wrapperAssemblyDef.MainModule;
             var type = module.GetType(typeDef.FullName);
-            if (type == null)
+
+            if (type != null)
             {
-                if (typeDef.IsNested)
+                return type;
+            }
+
+            if (typeDef.IsNested)
+            {
+                type = new TypeDefinition(typeDef.Namespace, typeDef.Name, typeDef.Attributes, GetOriginalType(typeDef.BaseType, module))
                 {
-                    type = new TypeDefinition(typeDef.Namespace, typeDef.Name, typeDef.Attributes, GetOriginalType(typeDef.BaseType, module));
+                    // 复制内存布局属性（pack 和 size）
+                    PackingSize = typeDef.PackingSize,
+                    ClassSize = typeDef.ClassSize
+                };
 
-                    if (TypeInfoHelper.IsCompilerGeneratedType(typeDef))
+                if (TypeInfoHelper.IsCompilerGeneratedType(typeDef))
+                {
+                    foreach (var implementation in typeDef.Interfaces)
                     {
-                        foreach (var implementation in typeDef.Interfaces)
-                        {
-                            type.Interfaces.Add(new InterfaceImplementation(GetOriginalType(implementation.InterfaceType, module)));
-                        }
-
-                        foreach (var attribute in typeDef.CustomAttributes)
-                        {
-                            type.CustomAttributes.Add(new CustomAttribute(module.ImportReference(attribute.Constructor)));
-                        }
-                    }
-                    else
-                    {
-                        type.IsPublic = true;
+                        type.Interfaces.Add(new InterfaceImplementation(GetOriginalType(implementation.InterfaceType, module)));
                     }
 
-                    module.GetType(typeDef.DeclaringType.FullName).NestedTypes.Add(type);
+                    foreach (var attribute in typeDef.CustomAttributes)
+                    {
+                        type.CustomAttributes.Add(new CustomAttribute(module.ImportReference(attribute.Constructor)));
+                    }
                 }
                 else
                 {
-                    type = new TypeDefinition(typeDef.Namespace, typeDef.Name, typeDef.Attributes, GetOriginalType(typeDef.Module.TypeSystem.Object, module))
+                    type.IsPublic = true;
+                }
+
+                module.GetType(typeDef.DeclaringType.FullName).NestedTypes.Add(type);
+            }
+            else
+            {
+                type = new TypeDefinition(typeDef.Namespace, typeDef.Name, typeDef.Attributes, GetOriginalType(typeDef.Module.TypeSystem.Object, module))
+                {
+                    // 复制内存布局属性（pack 和 size）
+                    PackingSize = typeDef.PackingSize,
+                    ClassSize = typeDef.ClassSize,
+                    IsPublic = true
+                };
+                module.Types.Add(type);
+            }
+
+            if (copyMembers)
+            {
+                foreach (var fieldDef in typeDef.Fields)
+                {
+                    var newField = new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, module))
                     {
-                        IsPublic = true
+                        Constant = fieldDef.Constant,
+                        InitialValue = fieldDef.InitialValue
                     };
-                    module.Types.Add(type);
+
+                    type.Fields.Add(newField);
+                }
+
+                foreach (var propertyDef in typeDef.Properties)
+                {
+                    type.Properties.Add(new PropertyDefinition(propertyDef.Name, propertyDef.Attributes, GetOriginalType(propertyDef.PropertyType, module)));
+                }
+                
+                foreach (var methodDef in typeDef.Methods)
+                {
+                    var wrapperMethodDef = ExtractMethodToAssembly(wrapperAssemblyDef, methodDef, false);
+                    HandleMethodInstruction(wrapperMethodDef, wrapperAssemblyDef.MainModule);
+                }
+
+                foreach (var nestedType in typeDef.NestedTypes)
+                {
+                    ExtractTypeToAssembly(wrapperAssemblyDef, nestedType, true);
+                }
+            }
+            else if(TypeInfoHelper.IsCompilerGeneratedType(typeDef))
+            {
+                foreach (var methodDef in typeDef.Methods)
+                {
+                    if (methodDef.IsConstructor)
+                    {
+                        var wrapperMethodDef = ExtractMethodToAssembly(wrapperAssemblyDef, methodDef, false);
+                        HandleMethodInstruction(wrapperMethodDef, wrapperAssemblyDef.MainModule);
+                    }
                 }
             }
 
@@ -466,47 +529,6 @@ namespace CompileServer.Services
             return wrapperMethodDef;
         }
 
-        private TypeDefinition ExtractNestedTypeToAssembly(AssemblyDefinition wrapperAssemblyDef, TypeDefinition typeDef)
-        {
-            var module = wrapperAssemblyDef.MainModule;
-            var nestedType = module.GetType(typeDef.FullName);
-            if (nestedType != null)
-            {
-                return nestedType;
-            }
-
-            nestedType = ExtractTypeToAssembly(wrapperAssemblyDef, typeDef);
-
-            var isTaskStateMachine = TypeInfoHelper.TypeIsTaskStateMachine(typeDef);
-            var isCompilerGenerated = TypeInfoHelper.IsCompilerGeneratedType(typeDef);
-
-            if (isTaskStateMachine)
-            {
-                foreach (var fieldDef in typeDef.Fields)
-                {
-                    nestedType.Fields.Add(new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, module)));
-                }
-
-                foreach (var propertyDef in typeDef.Properties)
-                {
-                    nestedType.Properties.Add(new PropertyDefinition(propertyDef.Name, propertyDef.Attributes, GetOriginalType(propertyDef.PropertyType, module)));
-                }
-            }
-
-            if (isTaskStateMachine || isCompilerGenerated)
-            {
-                foreach (var methodDef in typeDef.Methods)
-                {
-                    if (isTaskStateMachine || methodDef.IsConstructor)
-                    {
-                        var wrapperMethodDef = ExtractMethodToAssembly(wrapperAssemblyDef, methodDef, false);
-                        HandleMethodInstruction(wrapperMethodDef, wrapperAssemblyDef.MainModule);
-                    }
-                }   
-            }
-
-            return nestedType;
-        }
         #endregion
 
         #region Private 方法 - 指令处理
@@ -686,11 +708,20 @@ namespace CompileServer.Services
                         return;
                 }
             }
-
-            // 编译时创建的内部类的成员后续统一处理
+            
+            if (inst.OpCode == OpCodes.Ldtoken)
+            {
+                var tokenType = ExtractTypeToAssembly(module.Assembly, fieldRef.DeclaringType as TypeDefinition, true);
+                if (tokenType != null)
+                {
+                    inst.Operand = tokenType.Fields.FirstOrDefault((fieldDef => fieldDef.FullName == fieldRef.FullName));
+                    processor.Append(inst);
+                    return;
+                }
+            }
+            
             if (TypeInfoHelper.IsCompilerGeneratedType(fieldRef.DeclaringType as TypeDefinition))
             {
-                // NestedTypeInfo.AddField(fieldRef);
                 inst.Operand = GetNestedFieldDefinition(module.Assembly, fieldRef as FieldDefinition);
                 processor.Append(inst);
                 return;
@@ -773,6 +804,12 @@ namespace CompileServer.Services
         private bool CheckTypeIsScopeInModule(TypeReference typeRef, ModuleDefinition module)
         {
             if (typeRef == null)
+            {
+                return false;
+            }
+
+            // 编译器生成的静态数组类，应该使用当前程序集的类型
+            if (typeRef.FullName.StartsWith("<PrivateImplementationDetails>"))
             {
                 return false;
             }
@@ -865,9 +902,9 @@ namespace CompileServer.Services
                 return newGenericParameter;
             }
             
-            if (typeRef is TypeDefinition nestedTypeDef && TypeInfoHelper.IsCompilerGeneratedType(nestedTypeDef))
+            if (typeRef is TypeDefinition compilerGeneratedType && TypeInfoHelper.IsCompilerGeneratedType(compilerGeneratedType))
             {
-                return ExtractNestedTypeToAssembly(module.Assembly, nestedTypeDef);
+                return ExtractTypeToAssembly(module.Assembly, compilerGeneratedType, TypeInfoHelper.IsTaskStateMachine(compilerGeneratedType));
             }
 
             if (typeRef is TypeSpecification typeSpec)
@@ -912,11 +949,17 @@ namespace CompileServer.Services
         
         private FieldDefinition GetNestedFieldDefinition(AssemblyDefinition wrapperAssemblyDef, FieldDefinition fieldDef)
         {
-            var typeDef = ExtractNestedTypeToAssembly(wrapperAssemblyDef, fieldDef.DeclaringType.Resolve());
+            var typeDef = ExtractTypeToAssembly(wrapperAssemblyDef, fieldDef.DeclaringType, TypeInfoHelper.IsTaskStateMachine(fieldDef.DeclaringType));
             var wrapperFieldDef = typeDef.Fields.FirstOrDefault(f => f.FullName == fieldDef.FullName);
             if (wrapperFieldDef == null)
             {
-                wrapperFieldDef = new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, wrapperAssemblyDef.MainModule));
+                wrapperFieldDef = new FieldDefinition(fieldDef.Name, fieldDef.Attributes, GetOriginalType(fieldDef.FieldType, wrapperAssemblyDef.MainModule))
+                {
+                    // 复制初始化数据（bytearray / RVA数据）
+                    Constant = fieldDef.Constant,
+                    InitialValue = fieldDef.InitialValue
+                };
+
                 typeDef.Fields.Add(wrapperFieldDef);
             }
             return wrapperFieldDef;
@@ -924,7 +967,7 @@ namespace CompileServer.Services
         
         private MethodDefinition GetNestedMethodDefinition(AssemblyDefinition wrapperAssemblyDef, MethodDefinition methodDef)
         {
-            var typeDef = ExtractNestedTypeToAssembly(wrapperAssemblyDef, methodDef.DeclaringType.Resolve());
+            var typeDef = ExtractTypeToAssembly(wrapperAssemblyDef, methodDef.DeclaringType, TypeInfoHelper.IsTaskStateMachine(methodDef.DeclaringType));
             var wrapperMethodDef = typeDef.Methods.FirstOrDefault(m => m.Name == methodDef.Name && m.Parameters.Count == methodDef.Parameters.Count);
             if (wrapperMethodDef == null)
             {

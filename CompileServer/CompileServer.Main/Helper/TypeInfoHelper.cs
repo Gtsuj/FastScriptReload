@@ -321,9 +321,9 @@ namespace CompileServer.Helper
 
                 return originalTypeRef;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($"查找类型 {assemblyName}:{typeFullName} 时出错: {ex.Message}");
+                // ignored
             }
 
             return null;
@@ -375,7 +375,7 @@ namespace CompileServer.Helper
         /// <summary>
         /// 检查类型是否是Task状态机
         /// </summary>
-        public static bool TypeIsTaskStateMachine(TypeDefinition typeDef)
+        public static bool IsTaskStateMachine(TypeDefinition typeDef)
         {
             return typeDef.Interfaces.Any(implementation =>
                 implementation.InterfaceType.FullName.Equals("System.Runtime.CompilerServices.IAsyncStateMachine"));
@@ -386,8 +386,10 @@ namespace CompileServer.Helper
         /// </summary>
         public static bool IsCompilerGeneratedType(TypeDefinition typeDef)
         {
-            if (typeDef == null || !typeDef.IsNested)
+            if (typeDef == null)
+            {
                 return false;
+            }
 
             return typeDef.CustomAttributes.Any(attr =>
                 attr.AttributeType.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute");
