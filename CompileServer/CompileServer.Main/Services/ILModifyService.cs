@@ -23,7 +23,7 @@ namespace CompileServer.Services
         #region 私有字段
 
         private readonly ILogger<ILModifyService> _logger;
-        
+
         private Dictionary<string, AssemblyDefinition> _wrapperAssemblyDict = new();
 
         #endregion
@@ -86,7 +86,7 @@ namespace CompileServer.Services
             foreach (var (typeName, diffResult) in diffResults)
             {
                 var assemblyName = diffResult.AssemblyName;
-                
+
                 if (!ReloadHelper.HookTypeInfoCache.TryGetValue(typeName, out var hookTypeInfo))
                 {
                     hookTypeInfo = new HookTypeInfo
@@ -99,7 +99,7 @@ namespace CompileServer.Services
 
                 var patchAssemblyDef = diffResult.AssemblyDef;
                 var wrapperAssemblyDef = GetOrAddWrapperAssembly(assemblyName, patchAssemblyDef);
-                
+
                 var typeDef = patchAssemblyDef?.MainModule.GetType(typeName);
 
                 if (patchAssemblyDef != null)
@@ -122,7 +122,7 @@ namespace CompileServer.Services
                             };
 
                             targetTypeDef.Fields.Add(newField);
-                            
+
                             // 生成字段初始化方法
                             var initMethod = CreateFieldInitializerMethod(wrapperAssemblyDef, typeDef, fieldDef);
                             if (initMethod != null)
@@ -145,7 +145,7 @@ namespace CompileServer.Services
                         hookTypeInfo.AddOrModifyMethod(methodDef.FullName, wrapperMethodDef, methodDiffInfo.ModifyState);
                     }
                 }
-                
+
                 // 处理泛型调用者
                 foreach (var (methodName, methodDiffInfo) in diffResult.ModifiedMethods)
                 {
@@ -188,7 +188,7 @@ namespace CompileServer.Services
                         HandleMethodInstruction(methodDef, module);
                     }
                 }
-                
+
                 foreach (var methodDef in typeDef.Methods)
                 {
                     HandleMethodInstruction(methodDef, module);
@@ -203,7 +203,7 @@ namespace CompileServer.Services
             Dictionary<string, string> assemblyPathMap, Dictionary<string, DiffResult> diffResults)
         {
             var allHookTypeInfos = new Dictionary<string, HookTypeInfo>();
-            
+
             foreach (var (typeFullName, diffResult) in diffResults)
             {
                 // 从全局缓存中获取完整的 HookTypeInfo
@@ -232,7 +232,7 @@ namespace CompileServer.Services
                     {
                         // 设置程序集路径
                         hookMethodInfo.HistoricalHookedAssemblyPaths.Add(assemblyPath);
-                        
+
                         // 添加到返回结果
                         hookTypeInfo.ModifiedMethods[methodFullName] = hookMethodInfo;
                     }
@@ -245,7 +245,7 @@ namespace CompileServer.Services
                     {
                         // 设置程序集路径
                         hookFieldInfo.HistoricalHookedAssemblyPaths.Add(assemblyPath);
-                        
+
                         // 添加到返回结果
                         hookTypeInfo.ModifiedFields.TryAdd(fieldFullName, hookFieldInfo);
                     }
@@ -281,7 +281,7 @@ namespace CompileServer.Services
                 {
                     assemblyDef = AssemblyDefinition.CreateAssembly(patchAssembly.Name, patchAssembly.MainModule.Name, ModuleKind.Dll);
                 }
-                
+
                 _wrapperAssemblyDict[assemblyName] = assemblyDef;
             }
 
@@ -363,7 +363,7 @@ namespace CompileServer.Services
                 {
                     type.Properties.Add(new PropertyDefinition(propertyDef.Name, propertyDef.Attributes, GetOriginalType(propertyDef.PropertyType, module)));
                 }
-                
+
                 foreach (var methodDef in typeDef.Methods)
                 {
                     var wrapperMethodDef = ExtractMethodToAssembly(wrapperAssemblyDef, methodDef, false);
@@ -375,7 +375,7 @@ namespace CompileServer.Services
                     ExtractTypeToAssembly(wrapperAssemblyDef, nestedType, true);
                 }
             }
-            else if(TypeInfoHelper.IsCompilerGeneratedType(typeDef))
+            else if (TypeInfoHelper.IsCompilerGeneratedType(typeDef))
             {
                 foreach (var methodDef in typeDef.Methods)
                 {
@@ -415,7 +415,7 @@ namespace CompileServer.Services
                     genericParameters.Add(newGenericParam.Name, newGenericParam);
                 }
             }
-            
+
             targetMethodRef.ReturnType = GetOriginalType(targetMethodRef.ReturnType, module, genericParameters);
 
             // 复制参数
@@ -425,7 +425,7 @@ namespace CompileServer.Services
                 originalParam.Constant = originalParam.Constant;
                 targetMethodRef.Parameters.Add(originalParam);
             }
-            
+
             if (sourceMethodRef is MethodDefinition sourceMethodDef && targetMethodRef is MethodDefinition targetMethodDef
                 && sourceMethodDef.HasBody)
             {
@@ -437,14 +437,14 @@ namespace CompileServer.Services
                 }
             }
         }
-        
+
         /// <summary>
         /// 将指定方法提取到目标程序集，指令不处理
         /// </summary>
         private MethodDefinition ExtractMethodToAssembly(AssemblyDefinition wrapperAssemblyDef, MethodDefinition methodDef, bool addThisParam = true)
         {
             var type = ExtractTypeToAssembly(wrapperAssemblyDef, methodDef.DeclaringType);
-            
+
             MethodDefinition wrapperMethodDef = null;
             wrapperMethodDef = type.Methods.FirstOrDefault((method => method.FullName.Equals(methodDef.FullName)));
 
@@ -454,7 +454,7 @@ namespace CompileServer.Services
             }
 
             var module = wrapperAssemblyDef.MainModule;
-            
+
             // 创建新方法定义
             if (methodDef.DeclaringType.IsNested && TypeInfoHelper.IsCompilerGeneratedType(methodDef.DeclaringType))
             {
@@ -464,7 +464,7 @@ namespace CompileServer.Services
                 {
                     wrapperMethodDef.Overrides.Add(module.ImportReference(methodOverride));
                 }
-                
+
                 foreach (var attribute in methodDef.CustomAttributes)
                 {
                     wrapperMethodDef.CustomAttributes.Add(new CustomAttribute(module.ImportReference(attribute.Constructor)));
@@ -708,7 +708,7 @@ namespace CompileServer.Services
                         return;
                 }
             }
-            
+
             if (inst.OpCode == OpCodes.Ldtoken)
             {
                 var tokenType = ExtractTypeToAssembly(module.Assembly, fieldRef.DeclaringType as TypeDefinition, true);
@@ -719,7 +719,7 @@ namespace CompileServer.Services
                     return;
                 }
             }
-            
+
             if (TypeInfoHelper.IsCompilerGeneratedType(fieldRef.DeclaringType as TypeDefinition))
             {
                 inst.Operand = GetNestedFieldDefinition(module.Assembly, fieldRef as FieldDefinition);
@@ -848,7 +848,7 @@ namespace CompileServer.Services
                     {
                         return true;
                     }
-                    
+
                     // 检查所有泛型参数（如 Test 是否在 Hook 程序集）
                     foreach (var genericArgument in genericInstanceType.GenericArguments)
                     {
@@ -857,7 +857,7 @@ namespace CompileServer.Services
                             return true;
                         }
                     }
-                    
+
                     return false;
                 }
 
@@ -901,7 +901,7 @@ namespace CompileServer.Services
 
                 return newGenericParameter;
             }
-            
+
             if (typeRef is TypeDefinition compilerGeneratedType && TypeInfoHelper.IsCompilerGeneratedType(compilerGeneratedType))
             {
                 return ExtractTypeToAssembly(module.Assembly, compilerGeneratedType, TypeInfoHelper.IsTaskStateMachine(compilerGeneratedType));
@@ -946,7 +946,7 @@ namespace CompileServer.Services
             // 未找到原类型，返回原类型引用（导入引用以确保类型正确）
             return module.ImportReference(typeRef);
         }
-        
+
         private FieldDefinition GetNestedFieldDefinition(AssemblyDefinition wrapperAssemblyDef, FieldDefinition fieldDef)
         {
             var typeDef = ExtractTypeToAssembly(wrapperAssemblyDef, fieldDef.DeclaringType, TypeInfoHelper.IsTaskStateMachine(fieldDef.DeclaringType));
@@ -964,7 +964,7 @@ namespace CompileServer.Services
             }
             return wrapperFieldDef;
         }
-        
+
         private MethodDefinition GetNestedMethodDefinition(AssemblyDefinition wrapperAssemblyDef, MethodDefinition methodDef)
         {
             var typeDef = ExtractTypeToAssembly(wrapperAssemblyDef, methodDef.DeclaringType, TypeInfoHelper.IsTaskStateMachine(methodDef.DeclaringType));
@@ -976,7 +976,7 @@ namespace CompileServer.Services
                 HandleMethodInstruction(wrapperMethodDef, wrapperAssemblyDef.MainModule);
             }
             return wrapperMethodDef;
-        }        
+        }
 
         /// <summary>
         /// 处理泛型实例类型（如 List&lt;Test&gt;、Dictionary&lt;string, Test[]&gt;）
@@ -1009,6 +1009,7 @@ namespace CompileServer.Services
             var elementType = GetOriginalType(arrayType.ElementType, module, genericParameters);
 
             var newArrayType = new ArrayType(elementType);
+            newArrayType.Dimensions.Clear();
             foreach (var dimension in arrayType.Dimensions)
             {
                 newArrayType.Dimensions.Add(dimension);
@@ -1086,11 +1087,11 @@ namespace CompileServer.Services
         {
             var module = wrapperAssemblyDef.MainModule;
             var targetTypeDef = ExtractTypeToAssembly(wrapperAssemblyDef, typeDef);
-            
+
             // 方法名格式: <Init_{FieldName}>
             var methodName = $"<Init_{fieldDef.Name}>";
             var fieldType = GetOriginalType(fieldDef.FieldType, module);
-            
+
             // 创建初始化方法（无参数，返回字段类型）
             var initMethod = new MethodDefinition(
                 methodName,
@@ -1100,19 +1101,19 @@ namespace CompileServer.Services
             {
                 ImplAttributes = MethodImplAttributes.NoInlining
             };
-            
+
             // 从原类型的构造函数或字段初始化器中提取初始化逻辑
             bool hasInitLogic = ExtractFieldInitializationLogic(initMethod, typeDef, fieldDef);
-            
+
             if (!hasInitLogic)
             {
                 // 没有初始化逻辑，不生成初始化方法
                 return null;
             }
-            
+
             // 添加方法到类型
             targetTypeDef.Methods.Add(initMethod);
-            
+
             return initMethod;
         }
 
@@ -1123,10 +1124,10 @@ namespace CompileServer.Services
         private bool ExtractFieldInitializationLogic(MethodDefinition initMethod, TypeDefinition originalType, FieldDefinition fieldDef)
         {
             // 查找构造函数
-            var ctor = fieldDef.IsStatic 
+            var ctor = fieldDef.IsStatic
                 ? originalType.Methods.FirstOrDefault(m => m.IsConstructor && m.IsStatic)
                 : originalType.Methods.FirstOrDefault(m => m.IsConstructor && !m.IsStatic);
-            
+
             if (ctor == null || !ctor.HasBody)
             {
                 // 没有构造函数，不生成初始化方法
